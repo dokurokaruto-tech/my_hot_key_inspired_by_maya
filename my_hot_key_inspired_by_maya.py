@@ -1,6 +1,7 @@
 import bpy
 import os
 import time
+import math
 
 
 # ============================================================
@@ -29,12 +30,11 @@ KEEP_SPACE_PLAY_IN_ANIM_EDITORS = True
 
 # Alt+1 のコントローラー表示切替で、
 # ボーンに加えてエンプティも一緒に切り替えるか。
-#
-# エンプティをIKターゲット等のコントローラーとして使う
-# リグを扱う場合は True にする。
-# （エンプティを配置用の目印などに使っている場合は
-#   Falseのままを推奨）
 ALT1_ALSO_TOGGLE_EMPTIES = False
+
+# Alt+* でオブジェクトのデルタトランスフォーム
+# （Delta Location等）も初期化するか。
+RESET_DELTA_TRANSFORMS = True
 
 
 # ============================================================
@@ -88,14 +88,11 @@ def activate_clean_industry_keymap():
 
     result = bpy.utils.keyconfig_set(filepath)
 
-    # BlenderのバージョンによってはNoneが返る場合もあるため、
-    # 明示的にFalseの場合だけ失敗扱いにする。
     if result is False:
         raise RuntimeError(
             "Industry Compatibleキーマップを有効化できませんでした。"
         )
 
-    # userキーマップを現在のベース設定に戻す。
     result = bpy.ops.preferences.keymap_restore(all=True)
 
     if 'FINISHED' not in result:
@@ -248,8 +245,6 @@ def add_binding(
         "oskey": oskey,
     }
 
-    # head=Trueに対応するBlenderでは、
-    # 既存項目より優先される位置に追加する。
     try:
         kmi = km.keymap_items.new(
             operator,
@@ -263,7 +258,6 @@ def add_binding(
             **arguments,
         )
 
-    # キーリピートの制御（対応バージョンのみ）
     if repeat is not None:
         try:
             kmi.repeat = repeat
@@ -287,6 +281,139 @@ def add_binding(
 
 
 # ============================================================
+# グローバルキーポリシー
+# （どのエディターにカーソルがあっても同じ動作を保証する）
+# ============================================================
+
+# 仕組み:
+#   1) ここに載せたキーについて、全キーマップ（3D View /
+#      Graph Editor / Dopesheet / Outliner / Properties ...）を
+#      走査し、競合する完全一致の割り当てを active=False にする。
+#      （エディター固有キーマップはグローバルより優先されるため、
+#        これをやらないとカーソル位置によって別の機能が発動する）
+#   2) その後、全エディター共通の「Window」キーマップに
+#      目的のオペレーターを登録し直す。
+#
+# 削除ではなく無効化なので、
+# Preferences > Keymap の Restore からいつでも復元できる。
+#
+# 形式: (キー, value, shift, ctrl, alt, 残すオペレーターのセット)
+GLOBAL_KEY_POLICIES = (
+    # Z = Undo（グラフエディタ等の別機能をすべて無効化）
+    ('Z', 'PRESS', False, False, False,
+     {'ed.undo'}),
+
+    # Alt+Q = 再生 / 停止
+    ('Q', 'PRESS', False, False, True,
+     {'screen.animation_play'}),
+
+    # Alt+A / Alt+D = 1フレーム移動
+    ('A', 'PRESS', False, False, True,
+     {'screen.frame_offset'}),
+    ('D', 'PRESS', False, False, True,
+     {'screen.frame_offset'}),
+
+    # Alt+W / Alt+S = キーフレームジャンプ
+    ('W', 'PRESS', False, False, True,
+     {'screen.maya_keyframe_jump'}),
+    ('S', 'PRESS', False, False, True,
+     {'screen.maya_keyframe_jump'}),
+
+    # Alt+1 = コントローラー表示切替
+    ('ONE', 'PRESS', False, False, True,
+     {'view3d.maya_toggle_controllers'}),
+
+    # Alt+* = トランスフォーム初期化
+    ('NUMPAD_ASTERIX', 'PRESS', False, False, True,
+     {'object.maya_reset_transforms'}),
+    ('EIGHT', 'PRESS', True, False, True,
+     {'object.maya_reset_transforms'}),
+)
+
+
+def apply_global_key_policies(keyconfig):
+    """
+    GLOBAL_KEY_POLICIESに基づき、
+    競合する割り当てを全キーマップで無効化する。
+    """
+
+    disabled_count = 0
+
+    for km in keyconfig.keymaps:
+        for kmi in km.keymap_items:
+            for (
+                event_type,
+                value,
+                shift,
+                ctrl,
+                alt,
+                keep_idnames,
+            ) in GLOBAL_KEY_POLICIES:
+
+                if kmi.idname in keep_idnames:
+                    continue
+
+                if is_exact_event(
+                    kmi,
+                    event_type,
+                    value=value,
+                    shift=shift,
+                    ctrl=ctrl,
+                    alt=alt,
+                ):
+                    if kmi.active:
+                        kmi.active = False
+                        disabled_count += 1
+                    break
+
+    print(
+        f"🔇 グローバルキーポリシーにより {disabled_count} 件の"
+        "競合割り当てを無効化しました。"
+    )
+
+
+def disable_alt_s_keyinsert_conflicts(keyconfig):
+    """
+    Alt+S で「キーフレーム挿入」が誤発動する問題への対策。
+
+    any=True または alt=True で S キーに反応する
+    キーフレーム挿入系の項目をピンポイントで無効化する。
+    修飾キーなしの素の S = キー挿入はそのまま残る。
+    """
+
+    keyframe_insert_prefixes = (
+        'anim.keyframe_insert',
+    )
+
+    disabled_count = 0
+
+    for km in keyconfig.keymaps:
+        for kmi in km.keymap_items:
+            if kmi.type != 'S':
+                continue
+
+            is_keyframe_insert = any(
+                kmi.idname.startswith(prefix)
+                for prefix in keyframe_insert_prefixes
+            )
+
+            if not is_keyframe_insert:
+                continue
+
+            # any=True はすべての修飾キーの組み合わせに反応するため、
+            # Alt+Sも拾ってしまう。alt=True指定のものも同様。
+            if kmi.any or kmi.alt:
+                if kmi.active:
+                    kmi.active = False
+                    disabled_count += 1
+
+    print(
+        f"🔇 Alt+Sで誤発動するキー挿入を {disabled_count} 件"
+        "無効化しました。"
+    )
+
+
+# ============================================================
 # スペース=再生の無効化
 # ============================================================
 
@@ -295,14 +422,7 @@ def disable_space_play_bindings(keyconfig):
     修飾キーなしの「スペース = screen.animation_play」を
     すべてのキーマップで無効化する。
 
-    なぜ必要か:
-    スペース=再生は「Frames」などのグローバルキーマップに
-    登録されている。3D View側のview3d.maya_spaceが
-    何らかの理由（オペレーター未登録・キーマップ再読込など）で
-    効かない場合、イベントがグローバル側に素通りして
-    再生が発動してしまう。
-
-    ここでは削除ではなく active=False にするだけなので、
+    削除ではなく active=False にするだけなので、
     Preferences > Keymap の Restore からいつでも復元できる。
     Shift+Space（逆再生）など修飾キー付きの項目には触れない。
     """
@@ -332,10 +452,6 @@ def restore_space_play_in_anim_editors(keyconfig):
     アニメーションエディターにだけ
     スペース=再生を個別に登録し直す。
 
-    「Frames」キーマップはすべてのエディターで共有されて
-    いるため、上のdisable_space_play_bindingsで無効化すると
-    タイムライン等でもスペース再生が消えてしまう。
-    そこでエディター固有のキーマップに再登録する。
     エディター固有キーマップはグローバルより優先されるため、
     ここに登録すれば確実に効く。
     """
@@ -374,25 +490,12 @@ def setup_maya_style_zoom_direction(preferences):
     Mayaのドリー:
         右（右下）にドラッグ = 拡大
         左（左上）にドラッグ = 縮小
-
-    view3d.zoomオペレーター自体には方向の設定がなく、
-    Preferencesの入力設定で挙動が決まるため、ここで設定する。
     """
 
     inputs = preferences.inputs
 
-    # ドラッグ量に比例してズームする方式。
-    # Mayaのドリーと同じ操作感になる。
-    # （'CONTINUE'はドラッグ中ズームし続ける方式なので使わない）
     inputs.view_zoom_method = 'DOLLY'
-
-    # 水平方向のドラッグでズームする。
-    # 右 = 拡大 / 左 = 縮小 となり、Mayaと同じ方向になる。
     inputs.view_zoom_axis = 'HORIZONTAL'
-
-    # 方向を反転しない。
-    # これで「左上に動かすと縮小」というMayaの挙動と一致する。
-    # もし逆に感じる場合はここを True にする。
     inputs.invert_mouse_zoom = False
 
 
@@ -429,12 +532,7 @@ def _is_region_view3d(value):
 
 
 def is_view3d_quadview(space):
-    """
-    SpaceView3DがQuad View状態かどうか。
-
-    region_quadviews は通常ビューでは空、
-    Quad Viewでは複数のRegionView3Dを持つ。
-    """
+    """SpaceView3DがQuad View状態かどうか。"""
 
     if space is None:
         return False
@@ -452,12 +550,7 @@ def _make_context_override_kwargs(
     space=None,
     region_data=None,
 ):
-    """
-    context.temp_override用のキーワードを作る。
-
-    window / screen / area / region の整合性が重要なので、
-    context.window.screen を優先する。
-    """
+    """context.temp_override用のキーワードを作る。"""
 
     kwargs = {}
 
@@ -495,16 +588,11 @@ def _make_context_override_kwargs(
 def resolve_region_data_for_region(context, area, region, space):
     """
     指定した3D ViewのWINDOW Regionに対応するRegionView3Dを取得する。
-
-    Quad Viewでは各小ビューごとにRegionView3Dが違う。
-    ここが取得できると、
-    「マウス下の小ビューを最大化」がより確実になる。
     """
 
     if area is None or region is None or space is None:
         return None
 
-    # BlenderのバージョンによってはRegion.dataにRegionView3Dが入る。
     try:
         region_data = getattr(region, "data", None)
 
@@ -513,7 +601,6 @@ def resolve_region_data_for_region(context, area, region, space):
     except Exception:
         pass
 
-    # 現在のcontextがすでにそのRegionなら context.region_data を使える。
     try:
         if context.area == area and context.region == region:
             region_data = context.region_data
@@ -523,9 +610,6 @@ def resolve_region_data_for_region(context, area, region, space):
     except Exception:
         pass
 
-    # context overrideして context.region_data を取りに行く。
-    # これでQuad View内の「マウス下の小ビュー」に対応する
-    # RegionView3Dを拾えることが多い。
     if hasattr(context, "temp_override"):
         kwargs = _make_context_override_kwargs(
             context,
@@ -550,9 +634,6 @@ def resolve_region_data_for_region(context, area, region, space):
             except Exception:
                 pass
 
-    # 通常ビューなら space.region_3d でよい。
-    # Quad View中にここへ落ちた場合、space.region_3dを返すと
-    # 「元のビュー固定」問題を再発させる可能性があるため返さない。
     if not is_view3d_quadview(space):
         try:
             region_data = space.region_3d
@@ -569,11 +650,6 @@ def find_view3d_area_region_under_mouse(context, mouse_x, mouse_y):
     """
     マウス座標から、3D Viewの Area / WINDOW Region / SpaceView3D /
     RegionView3D を探す。
-
-    重要:
-    Quad Viewでは、3D View Areaの中に複数のWINDOW Regionがある。
-    そのためcontext.region任せにせず、event.mouse_x / mouse_yから
-    実際にマウスが乗っている小ビューを探す。
     """
 
     screen = None
@@ -608,7 +684,6 @@ def find_view3d_area_region_under_mouse(context, mouse_x, mouse_y):
                 area = area_candidate
                 break
 
-    # フォールバック: 現在のcontext areaが3D Viewなら使う。
     if area is None:
         try:
             if context.area is not None and context.area.type == 'VIEW_3D':
@@ -634,7 +709,6 @@ def find_view3d_area_region_under_mouse(context, mouse_x, mouse_y):
 
     region = None
 
-    # まずはマウス座標が完全に含まれるWINDOW Regionを探す。
     if mouse_x is not None and mouse_y is not None:
         for region_candidate in window_regions:
             if _point_in_rect(
@@ -648,14 +722,12 @@ def find_view3d_area_region_under_mouse(context, mouse_x, mouse_y):
                 region = region_candidate
                 break
 
-    # セパレーター線上などで見つからない場合は、最も近いWINDOW Regionを使う。
     if region is None and window_regions and mouse_x is not None and mouse_y is not None:
         region = min(
             window_regions,
             key=lambda r: _region_center_distance_sq(r, mouse_x, mouse_y),
         )
 
-    # それでもダメなら現在のcontext.regionを使う。
     if region is None:
         try:
             if (
@@ -667,7 +739,6 @@ def find_view3d_area_region_under_mouse(context, mouse_x, mouse_y):
         except Exception:
             pass
 
-    # 最後のフォールバック。
     if region is None and window_regions:
         region = max(
             window_regions,
@@ -684,14 +755,58 @@ def find_view3d_area_region_under_mouse(context, mouse_x, mouse_y):
     return area, region, space, region_data
 
 
-def copy_region_view3d_state(src, dst):
+def find_any_view3d_space(context):
     """
-    RegionView3Dの視点状態をコピーする。
+    画面内で最大の3D ViewのSpaceView3Dを返す。
 
-    Quad View解除時に、マウス下の小ビューの状態を
-    space.region_3d側へコピーしておくことで、
-    Blenderが元のビューへ戻してしまう状況を防ぐ。
+    Alt+1などをアウトライナー等の上で押した場合の
+    フォールバックとして使う。
     """
+
+    screen = None
+
+    try:
+        if context.window is not None:
+            screen = context.window.screen
+    except Exception:
+        pass
+
+    if screen is None:
+        try:
+            screen = context.screen
+        except Exception:
+            return None
+
+    if screen is None:
+        return None
+
+    best_space = None
+    best_size = -1
+
+    for area in screen.areas:
+        if area.type != 'VIEW_3D':
+            continue
+
+        size = area.width * area.height
+
+        if size > best_size:
+            try:
+                candidate = area.spaces.active
+            except Exception:
+                continue
+
+            if (
+                candidate is not None and
+                getattr(candidate, "type", None) == 'VIEW_3D'
+            ):
+                best_space = candidate
+                best_size = size
+
+    return best_space
+
+
+def copy_region_view3d_state(src, dst):
+    """RegionView3Dの視点状態をコピーする。"""
 
     if src is None or dst is None:
         return
@@ -715,7 +830,6 @@ def copy_region_view3d_state(src, dst):
         try:
             value = getattr(src, attr)
 
-            # Vector / Quaternionなどはcopyしてから代入する。
             try:
                 value = value.copy()
             except Exception:
@@ -735,9 +849,6 @@ def call_region_quadview_for_region(
 ):
     """
     指定した3D View Regionを対象に screen.region_quadview を実行する。
-
-    これが今回の核心:
-    context任せにせず、マウス下の小ビューRegionをoverrideして実行する。
     """
 
     if area is None or region is None:
@@ -752,8 +863,6 @@ def call_region_quadview_for_region(
     )
 
     if hasattr(context, "temp_override"):
-        # Blenderのバージョンや状態によって region_data / space_data の
-        # overrideが厳しく判定される場合があるため、段階的に試す。
         override_variants = []
 
         override_variants.append(dict(kwargs))
@@ -780,7 +889,6 @@ def call_region_quadview_for_region(
             f" 通常contextで再試行します: {last_error}"
         )
 
-    # 古いBlender、またはoverride失敗時のフォールバック。
     return bpy.ops.screen.region_quadview()
 
 
@@ -792,11 +900,7 @@ def call_menu_pie_for_region(
     space,
     region_data,
 ):
-    """
-    指定した3D View Region上でパイメニューを呼ぶ。
-
-    Hotboxをマウス下のビューに出すための補助。
-    """
+    """指定した3D View Region上でパイメニューを呼ぶ。"""
 
     kwargs = _make_context_override_kwargs(
         context,
@@ -848,14 +952,7 @@ def call_menu_pie_for_region(
 # ============================================================
 
 class VIEW3D_MT_maya_hotbox_pie(bpy.types.Menu):
-    """
-    Maya Hotboxの代用パイメニュー。
-
-    キャラクターアニメーション作業に絞った構成。
-    下方向の「すべてのツール」からは wm.toolbar
-    （ツール一覧ポップアップ）が開くため、
-    そこから全ツールへアクセスできる。
-    """
+    """Maya Hotboxの代用パイメニュー。"""
 
     bl_idname = "VIEW3D_MT_maya_hotbox_pie"
     bl_label = "Hotbox (Maya風)"
@@ -865,8 +962,6 @@ class VIEW3D_MT_maya_hotbox_pie(bpy.types.Menu):
         is_pose = (context.mode == 'POSE')
 
         # --- 西（左）: キー挿入 ---
-        # Blender 4.1以降ではkeyframe_insert_menuが存在しない
-        # 場合があるため、存在チェックしてフォールバックする。
         if hasattr(bpy.types, "ANIM_OT_keyframe_insert_menu"):
             pie.operator(
                 "anim.keyframe_insert_menu",
@@ -903,7 +998,6 @@ class VIEW3D_MT_maya_hotbox_pie(bpy.types.Menu):
 
         # --- 北西: ブレイクダウナー or 開始フレームへ ---
         if is_pose:
-            # MayaのTween Machineに近い機能
             pie.operator(
                 "pose.breakdown",
                 text="ブレイクダウナー",
@@ -956,14 +1050,8 @@ class VIEW3D_OT_maya_space(bpy.types.Operator):
     """
     Mayaのスペースキーを再現するモーダルオペレーター。
 
-    単押し:
-        マウス下のビューポートを 1画面 / 4分割 でトグル。
-        4分割から戻るときは、
-        スペースを押した瞬間にマウスが乗っていた小ビューが
-        1画面になる。
-
-    長押し:
-        Hotbox風パイメニューを表示。
+    単押し: マウス下のビューポートを 1画面 / 4分割 でトグル。
+    長押し: Hotbox風パイメニューを表示。
     """
 
     bl_idname = "view3d.maya_space"
@@ -981,9 +1069,6 @@ class VIEW3D_OT_maya_space(bpy.types.Operator):
 
         self._start_time = time.monotonic()
 
-        # 重要:
-        # スペースを押した瞬間のマウス位置を保存する。
-        # Quad View内で「次に大きくしたいビュー」の判定に使う。
         self._mouse_x = getattr(event, "mouse_x", 0)
         self._mouse_y = getattr(event, "mouse_y", 0)
 
@@ -1011,13 +1096,6 @@ class VIEW3D_OT_maya_space(bpy.types.Operator):
             self._timer = None
 
     def _update_mouse_from_event(self, event):
-        """
-        イベントからマウス座標を更新する。
-
-        キーボードイベントでもmouse_x/mouse_yを持っていることが多い。
-        TIMERでは不確かなため更新しない。
-        """
-
         if event.type == 'TIMER':
             return
 
@@ -1033,9 +1111,6 @@ class VIEW3D_OT_maya_space(bpy.types.Operator):
     def modal(self, context, event):
         self._update_mouse_from_event(event)
 
-        # 単押し / 長押し後リリース:
-        # 以前の版では、長押し判定前にRELEASEが来ると常にQuad切替に
-        # なっていた。ここでは経過時間も見る。
         if event.type == 'SPACE' and event.value == 'RELEASE':
             self._remove_timer(context)
 
@@ -1048,12 +1123,9 @@ class VIEW3D_OT_maya_space(bpy.types.Operator):
 
             return {'FINISHED'}
 
-        # 長押し中のキーリピート（SPACEのPRESS再送）は無視して
-        # イベントを消費する。素通りさせると他の機能が発動する。
         if event.type == 'SPACE' and event.value == 'PRESS':
             return {'RUNNING_MODAL'}
 
-        # 長押し: 閾値を超えた
         if event.type == 'TIMER':
             elapsed = time.monotonic() - self._start_time
 
@@ -1062,7 +1134,6 @@ class VIEW3D_OT_maya_space(bpy.types.Operator):
                 self._open_hotbox(context)
                 return {'FINISHED'}
 
-        # 中断
         if event.type in {'ESC', 'RIGHTMOUSE'}:
             self._remove_timer(context)
             return {'CANCELLED'}
@@ -1099,12 +1170,6 @@ class VIEW3D_OT_maya_space(bpy.types.Operator):
         )
 
         try:
-            # Quad Viewから1画面へ戻る時、
-            # マウス下の小ビューのRegionView3Dをspace.region_3dへ
-            # 先にコピーしておく。
-            #
-            # これにより、Blenderが元のビューを優先してしまうケースでも、
-            # Mayaのように「マウスを置いていたビュー」が1画面になる。
             if (
                 space is not None and
                 is_view3d_quadview(space) and
@@ -1152,21 +1217,14 @@ class VIEW3D_OT_maya_space(bpy.types.Operator):
 
 class VIEW3D_OT_maya_toggle_controllers(bpy.types.Operator):
     """
-    Mayaの「パネルのShow設定でNURBSカーブ（コントローラー）を
-    表示/非表示する」ワークフローの移植。
-
-    Blenderのリグコントローラーは基本的にボーン
-    （カスタムシェイプ含む）として描画されるため、
-    ビューポートごとのオーバーレイ設定 overlay.show_bones を
-    トグルする。
+    ビューポートのボーン（＝リグコントローラー）表示をトグルする。
 
     ポイント:
     - ビューポート単位で切り替わる（Mayaのパネル単位と同じ感覚）。
-      Quad Viewでも、そのAreaのビュー全体に対して効く。
     - オブジェクト自体を隠すわけではないので、
       再生中でもアニメーションはそのまま動き続ける。
-    - マウスが乗っているビューポートに対して効くため、
-      複数ビューポートを並べていても直感的に使える。
+    - マウス下のビューポートを優先。3D View以外の上で押した場合は
+      画面内で最大の3D Viewに対して効く（グローバル対応）。
     """
 
     bl_idname = "view3d.maya_toggle_controllers"
@@ -1201,13 +1259,19 @@ class VIEW3D_OT_maya_toggle_controllers(bpy.types.Operator):
             else:
                 space = None
 
+        # グローバル対応:
+        # アウトライナー等の上で押された場合は、
+        # 画面内で最大の3D Viewにフォールバックする。
+        if space is None:
+            space = find_any_view3d_space(context)
+
         return space
 
     def _toggle(self, context, space):
         if space is None:
             self.report(
                 {'WARNING'},
-                "3D View上で実行してください。",
+                "3D Viewが見つかりませんでした。",
             )
             return {'CANCELLED'}
 
@@ -1220,19 +1284,15 @@ class VIEW3D_OT_maya_toggle_controllers(bpy.types.Operator):
             )
             return {'CANCELLED'}
 
-        # 現在の状態を反転する。
         show = not overlay.show_bones
         overlay.show_bones = show
 
-        # エンプティをコントローラーに使うリグ向けのオプション。
-        # ビューポートのオブジェクトタイプ可視性を連動させる。
         if ALT1_ALSO_TOGGLE_EMPTIES:
             try:
                 space.show_object_viewport_empty = show
             except Exception:
                 pass
 
-        # 再描画を促す。
         try:
             for area in context.window.screen.areas:
                 if area.type == 'VIEW_3D' and area.spaces.active == space:
@@ -1256,10 +1316,273 @@ class VIEW3D_OT_maya_toggle_controllers(bpy.types.Operator):
         return self._toggle(context, space)
 
 
+# ============================================================
+# Alt+W / Alt+S = キーフレームジャンプ（どこでも有効）
+# ============================================================
+
+class SCREEN_OT_maya_keyframe_jump(bpy.types.Operator):
+    """
+    選択オブジェクトのキーフレーム間をジャンプする。
+
+    選択中オブジェクトのアクションから直接キーフレームを
+    収集するため、カーソルがどのエディター上にあっても動作する。
+    """
+
+    bl_idname = "screen.maya_keyframe_jump"
+    bl_label = "キーフレームジャンプ (Maya Alt+W/S)"
+    bl_options = {'REGISTER'}
+
+    next: bpy.props.BoolProperty(
+        name="次のキーフレームへ",
+        default=True,
+    )
+
+    @staticmethod
+    def _collect_from_id(id_data, frames):
+        """1つのIDデータブロックからキーフレーム時刻を収集する。"""
+
+        anim = getattr(id_data, "animation_data", None)
+
+        if anim is None:
+            return
+
+        action = anim.action
+
+        if action is None:
+            return
+
+        try:
+            for fcurve in action.fcurves:
+                for keyframe_point in fcurve.keyframe_points:
+                    frames.add(keyframe_point.co.x)
+        except Exception:
+            pass
+
+    def _collect_keyframes(self, context):
+        """選択オブジェクト群からすべてのキーフレーム時刻を集める。"""
+
+        frames = set()
+
+        objects = set()
+
+        try:
+            objects.update(context.selected_objects or [])
+        except Exception:
+            pass
+
+        try:
+            if context.active_object is not None:
+                objects.add(context.active_object)
+        except Exception:
+            pass
+
+        for obj in objects:
+            self._collect_from_id(obj, frames)
+
+            data = getattr(obj, "data", None)
+
+            if data is not None:
+                self._collect_from_id(data, frames)
+
+                shape_keys = getattr(data, "shape_keys", None)
+
+                if shape_keys is not None:
+                    self._collect_from_id(shape_keys, frames)
+
+        return frames
+
+    def execute(self, context):
+        scene = context.scene
+
+        frames = self._collect_keyframes(context)
+
+        if not frames:
+            try:
+                return bpy.ops.screen.keyframe_jump(next=self.next)
+            except Exception:
+                self.report(
+                    {'INFO'},
+                    "選択オブジェクトにキーフレームがありません。",
+                )
+                return {'CANCELLED'}
+
+        try:
+            current = scene.frame_current_final
+        except Exception:
+            current = float(scene.frame_current)
+
+        epsilon = 1e-4
+
+        if self.next:
+            candidates = [f for f in frames if f > current + epsilon]
+            target = min(candidates) if candidates else None
+        else:
+            candidates = [f for f in frames if f < current - epsilon]
+            target = max(candidates) if candidates else None
+
+        if target is None:
+            self.report(
+                {'INFO'},
+                "これ以上キーフレームがありません。",
+            )
+            return {'CANCELLED'}
+
+        frame = int(math.floor(target))
+        subframe = target - frame
+
+        try:
+            scene.frame_set(frame, subframe=subframe)
+        except TypeError:
+            scene.frame_set(frame)
+
+        return {'FINISHED'}
+
+
+# ============================================================
+# Alt+* = トランスフォームを初期化（Maya風）
+# ============================================================
+
+class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
+    """
+    選択対象の移動 / 回転 / スケールをデフォルト値に戻す。
+
+    「すべて0にする」のではなく初期状態へ戻す:
+        移動:     (0, 0, 0)
+        回転:     単位回転（角度0）
+        スケール: (1, 1, 1)  ← 0ではなく1
+
+    Object Mode: 選択オブジェクトすべてが対象。
+                 （設定によりデルタトランスフォームも初期化）
+    Pose Mode:   選択ポーズボーンすべてが対象
+                 （レストポーズに戻る）。
+
+    プロパティへ直接代入する方式のため、
+    コンテキストに依存せず、どのエディター上からでも確実に動く。
+    Undo（Z）で元に戻せる。
+    """
+
+    bl_idname = "object.maya_reset_transforms"
+    bl_label = "トランスフォームを初期化 (Maya Alt+*)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @staticmethod
+    def _reset_transform_channels(target, include_delta=False):
+        """
+        オブジェクト / ポーズボーン共通の
+        トランスフォーム初期化処理。
+        """
+
+        try:
+            target.location = (0.0, 0.0, 0.0)
+        except Exception:
+            pass
+
+        # 回転はモードごとにプロパティが違うため、
+        # すべてデフォルト値に戻しておく。
+        try:
+            target.rotation_euler = (0.0, 0.0, 0.0)
+        except Exception:
+            pass
+
+        try:
+            target.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+        except Exception:
+            pass
+
+        try:
+            # (角度, X, Y, Z) デフォルトは角度0 / Y軸
+            target.rotation_axis_angle = (0.0, 0.0, 1.0, 0.0)
+        except Exception:
+            pass
+
+        try:
+            target.scale = (1.0, 1.0, 1.0)
+        except Exception:
+            pass
+
+        # オブジェクトのデルタトランスフォームも初期化する。
+        # （ポーズボーンには存在しないためtry/exceptで安全に処理）
+        if include_delta:
+            try:
+                target.delta_location = (0.0, 0.0, 0.0)
+            except Exception:
+                pass
+
+            try:
+                target.delta_rotation_euler = (0.0, 0.0, 0.0)
+            except Exception:
+                pass
+
+            try:
+                target.delta_rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+            except Exception:
+                pass
+
+            try:
+                target.delta_scale = (1.0, 1.0, 1.0)
+            except Exception:
+                pass
+
+    def execute(self, context):
+        reset_count = 0
+
+        if context.mode == 'POSE':
+            pose_bones = context.selected_pose_bones or []
+
+            for pose_bone in pose_bones:
+                self._reset_transform_channels(pose_bone)
+                reset_count += 1
+
+            if reset_count == 0:
+                self.report(
+                    {'WARNING'},
+                    "ボーンが選択されていません。",
+                )
+                return {'CANCELLED'}
+
+            self.report(
+                {'INFO'},
+                f"{reset_count} 本のボーンを初期姿勢に戻しました。",
+            )
+
+        else:
+            selected = list(context.selected_objects or [])
+
+            for obj in selected:
+                self._reset_transform_channels(
+                    obj,
+                    include_delta=RESET_DELTA_TRANSFORMS,
+                )
+                reset_count += 1
+
+            if reset_count == 0:
+                self.report(
+                    {'WARNING'},
+                    "オブジェクトが選択されていません。",
+                )
+                return {'CANCELLED'}
+
+            self.report(
+                {'INFO'},
+                f"{reset_count} 個のオブジェクトを初期状態に戻しました。",
+            )
+
+        try:
+            for area in context.window.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+        except Exception:
+            pass
+
+        return {'FINISHED'}
+
+
 MAYA_SPACE_CLASSES = (
     VIEW3D_MT_maya_hotbox_pie,
     VIEW3D_OT_maya_space,
     VIEW3D_OT_maya_toggle_controllers,
+    SCREEN_OT_maya_keyframe_jump,
+    OBJECT_OT_maya_reset_transforms,
 )
 
 
@@ -1291,22 +1614,18 @@ def setup_maya_keymap_fixed():
     preferences = bpy.context.preferences
 
     # Alt+左クリックとの衝突を防ぐため、先にOFFにする。
-    # Industry Compatible読み込み前に設定することが重要。
     preferences.inputs.use_mouse_emulate_3_button = False
 
     # Alt+右ドラッグのズーム方向をMayaに揃える。
-    # （キーマップではなくPreferencesの設定）
     setup_maya_style_zoom_direction(preferences)
 
     # スペースキー用のオペレーターとパイメニューを登録。
-    # キーマップに割り当てる前に登録しておく必要がある。
     register_maya_space_classes()
 
     # 以前のスクリプトで壊れた状態を一度復旧する。
     if RESET_TO_CLEAN_INDUSTRY_BASE:
         activate_clean_industry_keymap()
 
-        # 念のため、キーマップ復旧後にも入力設定を再適用する。
         preferences.inputs.use_mouse_emulate_3_button = False
         setup_maya_style_zoom_direction(preferences)
 
@@ -1322,15 +1641,23 @@ def setup_maya_keymap_fixed():
     # スペース=再生をグローバルに無効化
     # --------------------------------------------------------
 
-    # これをやらないと、view3d.maya_spaceが効かない状況
-    # （再起動直後でオペレーター未登録など）で
-    # スペースが「Frames」キーマップに素通りして
-    # 再生が発動してしまう。
     disable_space_play_bindings(kc)
 
     if KEEP_SPACE_PLAY_IN_ANIM_EDITORS:
-        # ドープシート/グラフ/NLAではスペース再生を復活させる。
         restore_space_play_in_anim_editors(kc)
+
+    # --------------------------------------------------------
+    # グローバルキーポリシーの適用
+    # --------------------------------------------------------
+
+    # Z / Alt+Q / Alt+A / Alt+D / Alt+W / Alt+S / Alt+1 / Alt+*
+    # について、全エディターの競合割り当てを一括で無効化する。
+    # これにより「ビューポートでは効くのに
+    # グラフエディタでは別の機能が動く」問題がなくなる。
+    apply_global_key_policies(kc)
+
+    # Alt+Sでキーフレーム挿入が誤発動する問題への個別対策。
+    disable_alt_s_keyinsert_conflicts(kc)
 
     # --------------------------------------------------------
     # 対象キーマップ
@@ -1345,6 +1672,13 @@ def setup_maya_keymap_fixed():
     km_screen = get_keymap(
         kc,
         "Screen",
+    )
+
+    # 「Window」キーマップは全エディター共通で常に効く。
+    # グローバルキーの受け皿として使う。
+    km_window = get_keymap(
+        kc,
+        "Window",
     )
 
     km_object = get_keymap(
@@ -1362,6 +1696,31 @@ def setup_maya_keymap_fixed():
         "Mesh",
     )
 
+    # アニメーションエディター
+    km_dopesheet = get_keymap(
+        kc,
+        "Dopesheet",
+        space_type='DOPESHEET_EDITOR',
+    )
+
+    km_graph = get_keymap(
+        kc,
+        "Graph Editor",
+        space_type='GRAPH_EDITOR',
+    )
+
+    km_nla = get_keymap(
+        kc,
+        "NLA Editor",
+        space_type='NLA_EDITOR',
+    )
+
+    # 2Dエディター共通ナビゲーション
+    km_view2d = get_keymap(
+        kc,
+        "View2D",
+    )
+
     mode_keymaps = (
         km_3d,
         km_object,
@@ -1370,11 +1729,83 @@ def setup_maya_keymap_fixed():
     )
 
     # --------------------------------------------------------
-    # Q / W / E / R
+    # グローバルキー（Windowキーマップ = どこでも有効）
     # --------------------------------------------------------
 
-    # Qはクリック選択とドラッグ範囲選択ができるSelect Boxにする。
-    # builtin.selectを使いたい場合はbuiltin.select_boxを変更する。
+    # エディター固有の競合はapply_global_key_policiesで
+    # 無効化済みなので、ここに登録すれば
+    # カーソルがどこにあっても確実に効く。
+
+    # Z = Undo（グラフエディタ/アウトライナー等でも必ずUndo）
+    add_binding(
+        km_window,
+        'ed.undo',
+        'Z',
+    )
+
+    # Alt+Q = 再生 / 停止
+    add_binding(
+        km_window,
+        'screen.animation_play',
+        'Q',
+        alt=True,
+        repeat=False,
+    )
+
+    # Alt+W / Alt+S = キーフレームジャンプ
+    # Alt+A / Alt+D = 1フレーム移動
+    global_anim_defs = (
+        ('W', 'screen.maya_keyframe_jump', {'next': False}),
+        ('S', 'screen.maya_keyframe_jump', {'next': True}),
+        ('A', 'screen.frame_offset', {'delta': -1}),
+        ('D', 'screen.frame_offset', {'delta': 1}),
+    )
+
+    for key, operator, properties in global_anim_defs:
+        add_binding(
+            km_window,
+            operator,
+            key,
+            alt=True,
+            properties=properties,
+        )
+
+    # Alt+1 = コントローラー表示切替
+    # （3D View以外の上で押した場合は最大の3D Viewに効く）
+    add_binding(
+        km_window,
+        'view3d.maya_toggle_controllers',
+        'ONE',
+        alt=True,
+        repeat=False,
+    )
+
+    # Alt+* = トランスフォーム初期化
+    #   1) Alt + テンキーの*
+    #   2) Alt + Shift + 8（US配列の*。テンキーなしキーボード用）
+    # ※ JIS配列フルキーの「*」(Shift+:)はBlenderのキーイベントに
+    #    確実に対応していないため、テンキーの*を推奨。
+    add_binding(
+        km_window,
+        'object.maya_reset_transforms',
+        'NUMPAD_ASTERIX',
+        alt=True,
+        repeat=False,
+    )
+
+    add_binding(
+        km_window,
+        'object.maya_reset_transforms',
+        'EIGHT',
+        alt=True,
+        shift=True,
+        repeat=False,
+    )
+
+    # --------------------------------------------------------
+    # Q / W / E / R（3D View系）
+    # --------------------------------------------------------
+
     qwer_defs = (
         ('Q', 'builtin.select_box'),
         ('W', 'builtin.move'),
@@ -1394,23 +1825,86 @@ def setup_maya_keymap_fixed():
             )
 
     # --------------------------------------------------------
-    # アニメーション操作
+    # W / E / R / F（アニメーションエディター系）
     # --------------------------------------------------------
 
+    # アニメーションエディターにはツールバーがないため、
+    # ツール切替ではなくトランスフォームオペレーターを直接呼ぶ。
+    # これでビューポートと同じ指癖のまま
+    # キーフレーム/ストリップを操作できる。
+
+    # Graph Editor: W/E/R = 移動 / 回転 / スケール
+    add_binding(km_graph, 'transform.translate', 'W')
+    add_binding(km_graph, 'transform.rotate', 'E')
+    add_binding(km_graph, 'transform.resize', 'R')
+
+    # Dopesheet: W = 時間移動 / R = 時間スケール
+    add_binding(
+        km_dopesheet,
+        'transform.transform',
+        'W',
+        properties={'mode': 'TIME_TRANSLATE'},
+    )
+    add_binding(
+        km_dopesheet,
+        'transform.transform',
+        'R',
+        properties={'mode': 'TIME_SCALE'},
+    )
+
+    # NLA: W = ストリップ移動 / R = 時間スケール
+    add_binding(
+        km_nla,
+        'transform.transform',
+        'W',
+        properties={'mode': 'TRANSLATION'},
+    )
+    add_binding(
+        km_nla,
+        'transform.transform',
+        'R',
+        properties={'mode': 'TIME_SCALE'},
+    )
+
+    # F = 選択にフォーカス（各アニメーションエディター）
+    add_binding(km_graph, 'graph.view_selected', 'F')
+    add_binding(km_dopesheet, 'action.view_selected', 'F')
+    add_binding(km_nla, 'nla.view_selected', 'F')
+
+    # --------------------------------------------------------
+    # 2Dエディター共通: Alt+中/右ドラッグでパン/ズーム
+    # --------------------------------------------------------
+
+    # Mayaのグラフエディタ操作の再現。
+    # View2Dキーマップはグラフ/ドープシート/NLA等で共通に効く。
+    add_binding(
+        km_view2d,
+        'view2d.pan',
+        'MIDDLEMOUSE',
+        alt=True,
+    )
+
+    add_binding(
+        km_view2d,
+        'view2d.zoom',
+        'RIGHTMOUSE',
+        alt=True,
+    )
+
+    # --------------------------------------------------------
+    # アニメーション操作（エディター固有側にも登録して確実化）
+    # --------------------------------------------------------
+
+    # Windowキーマップより先に評価されるエディター固有側にも
+    # 同じ割り当てを置いておくことで、将来アドオン等が
+    # 競合キーを追加しても意図した動作が優先される。
     anim_defs = (
-        # Z = Undo
         ('Z', 'ed.undo', {}, False),
-
-        # Alt+Q = 再生
         ('Q', 'screen.animation_play', {}, True),
-
-        # Alt+A / Alt+D = 1フレーム移動
         ('A', 'screen.frame_offset', {'delta': -1}, True),
         ('D', 'screen.frame_offset', {'delta': 1}, True),
-
-        # Alt+W / Alt+S = 前後のキーフレーム
-        ('W', 'screen.keyframe_jump', {'next': False}, True),
-        ('S', 'screen.keyframe_jump', {'next': True}, True),
+        ('W', 'screen.maya_keyframe_jump', {'next': False}, True),
+        ('S', 'screen.maya_keyframe_jump', {'next': True}, True),
     )
 
     animation_keymaps = (
@@ -1419,6 +1913,9 @@ def setup_maya_keymap_fixed():
         km_object,
         km_pose,
         km_mesh,
+        km_dopesheet,
+        km_graph,
+        km_nla,
     )
 
     for km_target in animation_keymaps:
@@ -1453,8 +1950,6 @@ def setup_maya_keymap_fixed():
     # スペースキー = Maya式（単押し/長押し）
     # --------------------------------------------------------
 
-    # グローバルのスペース=再生はすでに無効化済みなので、
-    # ビューポート内では必ずこのオペレーターが受け取る。
     add_binding(
         km_3d,
         'view3d.maya_space',
@@ -1463,15 +1958,9 @@ def setup_maya_keymap_fixed():
     )
 
     # --------------------------------------------------------
-    # Alt+1 = コントローラー表示切替（Maya風）
+    # Alt+1 / Alt+*（3D View系にも登録して優先度を確保）
     # --------------------------------------------------------
 
-    # マウスが乗っているビューポートの
-    # ボーン（＝リグコントローラー）表示をトグルする。
-    #
-    # モード固有キーマップ（Object/Pose/Mesh）が
-    # Alt+1を先に奪う可能性があるため、
-    # 3D Viewだけでなく各モードにも登録して確実に効かせる。
     for km_target in mode_keymaps:
         add_binding(
             km_target,
@@ -1481,13 +1970,32 @@ def setup_maya_keymap_fixed():
             repeat=False,
         )
 
+    for km_target in (
+        km_3d,
+        km_object,
+        km_pose,
+    ):
+        add_binding(
+            km_target,
+            'object.maya_reset_transforms',
+            'NUMPAD_ASTERIX',
+            alt=True,
+            repeat=False,
+        )
+
+        add_binding(
+            km_target,
+            'object.maya_reset_transforms',
+            'EIGHT',
+            alt=True,
+            shift=True,
+            repeat=False,
+        )
+
     # --------------------------------------------------------
-    # F = 選択対象にフォーカス
+    # F = 選択対象にフォーカス（3D View系）
     # --------------------------------------------------------
 
-    # Object Modeでは選択オブジェクト、
-    # Pose Modeでは選択ボーンなどにフォーカスする。
-    #
     # Meshキーマップには登録しない。
     # Edit ModeのF＝面作成を残すため。
     for km_target in (
@@ -1515,8 +2023,6 @@ def setup_maya_keymap_fixed():
         ('SEVEN', 'RENDERED'),
     )
 
-    # モード固有キーマップで数字キーが奪われないよう、
-    # 関連モードにだけ登録する。
     for km_target in mode_keymaps:
         for key, shading_type in shading_defs:
             add_binding(
@@ -1551,9 +2057,6 @@ def setup_maya_keymap_fixed():
                 properties={
                     'level': level,
                     'relative': False,
-
-                    # 2または3を押したときだけ、
-                    # 必要ならSubdivision Modifierを追加する。
                     'ensure_modifier': level > 0,
                 },
             )
@@ -1562,14 +2065,12 @@ def setup_maya_keymap_fixed():
     # F8 / F9 / F10 / F11
     # --------------------------------------------------------
 
-    # F8 = Object/Edit Mode切り替え
     add_binding(
         km_3d,
         'object.editmode_toggle',
         'F8',
     )
 
-    # F9/F10/F11 = 頂点/辺/面
     component_defs = (
         ('F9', 'VERT'),
         ('F10', 'EDGE'),
@@ -1606,15 +2107,6 @@ def setup_maya_keymap_fixed():
     # プリセット保存（バックアップのみ）
     # --------------------------------------------------------
 
-    # 以前はここで書き出したプリセットをkeyconfig_setで
-    # 再読込していたが、その再読込によって直前に加えた
-    # ユーザーキーマップの変更が失われ、スペースが
-    # 素の状態（=再生）に戻ってしまうことがあった。
-    #
-    # 現在の設定はユーザーキーマップ（keyconfigs.user）に
-    # 直接適用済みで、save_userpref()で永続化されるため、
-    # 再読込は不要。プリセットはバックアップとしてのみ
-    # 書き出す（all=Trueで全キーマップを含める）。
     if SAVE_AS_PRESET:
         preset_directory = bpy.utils.user_resource(
             'SCRIPTS',
@@ -1648,9 +2140,6 @@ def setup_maya_keymap_fixed():
     # 環境設定の保存
     # --------------------------------------------------------
 
-    # ズーム方向などのPreferences設定と、
-    # ユーザーキーマップの変更をまとめて保存する。
-    # 自動保存がOFFの環境でも確実に残るよう明示的に保存する。
     try:
         bpy.ops.wm.save_userpref()
         print("✅ 環境設定とキーマップを保存しました。")
@@ -1658,29 +2147,34 @@ def setup_maya_keymap_fixed():
         print(f"⚠️ 環境設定を保存できませんでした: {error}")
 
     print("🎉 Maya風キーマップの設定が完了しました。")
-    print("   Alt+左: 回転")
-    print("   Alt+中: パン")
-    print("   Alt+右: ズーム（右=拡大 / 左=縮小）")
-    print("   F: 選択対象へフォーカス")
+    print("   Alt+左: 回転 / Alt+中: パン / Alt+右: ズーム")
+    print("   （グラフ/ドープシート/NLAでも Alt+中=パン, Alt+右=ズーム）")
+    print("   F: 選択対象へフォーカス（アニメーションエディター内でも有効）")
     print("   Space単押し: 1画面 / 4分割 トグル")
-    print("      ※ 4分割から戻る時は、マウス下の小ビューを1画面化")
     print("   Space長押し: Hotbox風パイメニュー")
+    print("")
+    print("   ▼ 以下はカーソルがどのエディター上にあっても有効:")
+    print("   Z: Undo（グラフエディタ内でも必ずUndo）")
     print("   Alt+Q: 再生 / 停止")
+    print("   Alt+W / Alt+S: 前後のキーフレームへジャンプ")
+    print("   Alt+A / Alt+D: 1フレーム移動")
     print("   Alt+1: コントローラー（ボーン）表示 / 非表示")
-    print("      ※ マウス下のビューポート単位で切り替え")
-    print("      ※ 再生中でもアニメーションは動き続ける")
+    print("   Alt+テンキー* (または Alt+Shift+8):")
+    print("      選択対象のトランスフォームを初期化")
+    print("      ※ 移動/回転は0、スケールは1（デフォルト値）に戻る")
+    print("      ※ Pose Modeでは選択ボーンがレストポーズに戻る")
     print("")
-    print("ℹ️ スペース=再生はグローバルでは無効化しました。")
-    print("   （ドープシート/グラフ/NLA内でのみスペース再生が有効）")
+    print("   ▼ アニメーションエディター内:")
+    print("   W / E / R: キーフレームの移動 / 回転 / スケール")
+    print("      （回転はグラフエディタのみ）")
     print("")
-    print("⚠️ 重要: view3d.maya_space と view3d.maya_toggle_controllers は")
-    print("   カスタムオペレーターのため、Blender再起動後も使うには")
-    print("   以下のいずれかが必要です。")
+    print("ℹ️ 競合していた割り当ては削除ではなく無効化のみ。")
+    print("   Preferences > Keymap > Restore でいつでも復元できます。")
+    print("")
+    print("⚠️ 重要: カスタムオペレーターをBlender再起動後も使うには、")
     print("   1) このスクリプトをテキストエディターに保存し、")
     print("      「Register」にチェック → スタートアップファイルを保存")
-    print("   2) このスクリプトをアドオン化してインストール")
-    print("   ※ 未登録のままでもスペースで再生が誤発動することは")
-    print("      なくなりました（何も起きないだけ）。")
+    print("   2) またはアドオン化してインストール、のいずれかが必要です。")
 
 
 # 実行
