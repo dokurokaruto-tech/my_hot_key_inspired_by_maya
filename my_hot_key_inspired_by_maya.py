@@ -402,6 +402,67 @@ def disable_alt_s_keyinsert_conflicts(keyconfig):
     )
 
 
+def force_q_select_box_no_cycle(keyconfig):
+    """Qキーのツール割り当てから cycle を除去し、
+    矩形選択（builtin.select_box）に固定する。
+
+    Industry Compatible等では Q に cycle=True が付いており、
+    連打すると投げ縄・サークル選択へ切り替わってしまうため、
+    全キーマップを走査して強制的に固定する。
+    """
+    fixed_cycle_count = 0
+    fixed_name_count = 0
+
+    tool_set_idnames = {
+        'wm.tool_set_by_id',
+        'wm.tool_set_by_index',
+    }
+
+    for km in keyconfig.keymaps:
+        for kmi in km.keymap_items:
+            if kmi.type != 'Q':
+                continue
+
+            if kmi.idname not in tool_set_idnames:
+                continue
+
+            properties = kmi.properties
+
+            try:
+                if getattr(properties, "cycle", False):
+                    properties.cycle = False
+                    fixed_cycle_count += 1
+            except Exception:
+                pass
+
+            # 修飾キーなしのQで選択系ツールを呼ぶ割り当ては
+            # すべて矩形選択に固定する。
+            try:
+                if (
+                    not kmi.any and
+                    not kmi.shift and
+                    not kmi.ctrl and
+                    not kmi.alt and
+                    not kmi.oskey
+                ):
+                    name = getattr(properties, "name", "")
+
+                    if (
+                        isinstance(name, str) and
+                        name.startswith("builtin.select") and
+                        name != "builtin.select_box"
+                    ):
+                        properties.name = "builtin.select_box"
+                        fixed_name_count += 1
+            except Exception:
+                pass
+
+    print(
+        f"🔒 Qキーのツール切替: cycle無効化 {fixed_cycle_count} 件 / "
+        f"矩形選択へ固定 {fixed_name_count} 件"
+    )
+
+
 # ============================================================
 # スペース=再生の無効化
 # ============================================================
@@ -1226,8 +1287,8 @@ def apply_maya_micro_space_visibility(context, enabled):
 
 
 def register_maya_runtime_properties():
-    # 旧バージョンのプロパティ（maya_micro_manipulator_mode含む）を
-    # クリーンアップしてから登録し直す。
+    # maya_micro_manipulator_mode は旧バージョンの残骸。
+    # 削除リストに含めてクリーンアップする（再作成はしない）。
     property_names = (
         "maya_micro_manipulator_enabled",
         "maya_micro_manipulator_mode",
@@ -1744,7 +1805,7 @@ def _micro_active_tool_idname(context):
 
 
 def get_micro_manipulator_visible_mode(context):
-    # 常にW / E / R（現在のツール）に連動する。
+    """常にW / E / Rの現在ツールに連動する（AUTO固定）。"""
     tool_idname = _micro_active_tool_idname(context)
 
     if tool_idname == 'builtin.rotate':
@@ -1762,18 +1823,6 @@ def _safe_setattr(target, name, value):
         return True
     except Exception:
         return False
-
-
-def get_current_interaction_mode(context):
-    mode = getattr(context, "mode", 'OBJECT')
-
-    if mode == 'POSE':
-        return 'POSE'
-
-    if mode.startswith('EDIT'):
-        return 'EDIT'
-
-    return 'OBJECT'
 
 
 class VIEW3D_OT_maya_set_transform_orientation(bpy.types.Operator):
@@ -1834,7 +1883,7 @@ class VIEW3D_OT_maya_toggle_micro_manipulator(bpy.types.Operator):
         if self.enable:
             self.report(
                 {'INFO'},
-                "Micro Manipulator: ON（約1/10感度・W/E/R連動）",
+                "Micro Manipulator: ON（約1/10感度）",
             )
         else:
             self.report(
@@ -1843,6 +1892,20 @@ class VIEW3D_OT_maya_toggle_micro_manipulator(bpy.types.Operator):
             )
 
         return {'FINISHED'}
+
+
+def _interaction_mode_id(context_mode):
+    """context.mode を Object / Edit / Pose の3分類へ変換する。"""
+    if context_mode == 'POSE':
+        return 'POSE'
+
+    if context_mode.startswith('EDIT'):
+        return 'EDIT'
+
+    if context_mode == 'OBJECT':
+        return 'OBJECT'
+
+    return ''
 
 
 class VIEW3D_OT_maya_set_interaction_mode(bpy.types.Operator):
@@ -1861,25 +1924,30 @@ class VIEW3D_OT_maya_set_interaction_mode(bpy.types.Operator):
     )
 
     def execute(self, context):
-        obj = getattr(context, "active_object", None)
+        active = getattr(context, "active_object", None)
 
-        if self.mode != 'OBJECT':
-            if obj is None:
-                self.report(
-                    {'WARNING'},
-                    "アクティブオブジェクトがありません。",
-                )
-                return {'CANCELLED'}
+        if active is None:
+            self.report(
+                {'WARNING'},
+                "アクティブオブジェクトがありません。",
+            )
+            return {'CANCELLED'}
 
-            if self.mode == 'POSE' and obj.type != 'ARMATURE':
-                self.report(
-                    {'WARNING'},
-                    "Pose ModeはArmatureのみ使用できます。",
-                )
-                return {'CANCELLED'}
+        current = _interaction_mode_id(context.mode)
 
-        if get_current_interaction_mode(context) == self.mode:
+        if current == self.mode:
+            self.report(
+                {'INFO'},
+                f"すでに {self.mode} モードです。",
+            )
             return {'FINISHED'}
+
+        if self.mode == 'POSE' and active.type != 'ARMATURE':
+            self.report(
+                {'WARNING'},
+                "Pose Modeはアーマチュアのみ使用できます。",
+            )
+            return {'CANCELLED'}
 
         try:
             bpy.ops.object.mode_set(mode=self.mode)
@@ -1892,7 +1960,10 @@ class VIEW3D_OT_maya_set_interaction_mode(bpy.types.Operator):
 
         tag_all_view3d_redraw()
 
-        self.report({'INFO'}, f"Mode: {self.mode}")
+        self.report(
+            {'INFO'},
+            f"モード: {self.mode}",
+        )
         return {'FINISHED'}
 
 
@@ -1901,12 +1972,10 @@ class VIEW3D_MT_maya_manipulator_menu(bpy.types.Menu):
     bl_label = "Manipulator Settings"
 
     # 注意:
-    # このメニューはbox()やcolumn()の入れ子、scale_yによる
-    # 高さ操作を使わない「フラットな行のみ」の構成にしている。
-    # 行数を増やし過ぎたり入れ子レイアウトを使うと、
-    # 高さ計算が崩れて左右に大きな空白ができるため、
-    # 項目追加時もこの方針を維持すること。
-
+    # このメニューは box() / column() の入れ子や scale_y 調整を
+    # 使わず、単純な縦一列のフローだけで構成する。
+    # 入れ子レイアウトを混ぜると高さ計算が崩れて
+    # 左右に大きな空白ができるため、絶対に追加しないこと。
     def draw(self, context):
         layout = self.layout
 
@@ -1949,7 +2018,7 @@ class VIEW3D_MT_maya_manipulator_menu(bpy.types.Menu):
         toggle_operator = layout.operator(
             "view3d.maya_toggle_micro_manipulator",
             text=(
-                "Micro Manipulator: ON（W/E/R連動）"
+                "Micro Manipulator: ON"
                 if enabled
                 else "Micro Manipulator: OFF"
             ),
@@ -1961,14 +2030,19 @@ class VIEW3D_MT_maya_manipulator_menu(bpy.types.Menu):
         )
         toggle_operator.enable = not enabled
 
+        layout.label(
+            text="通常の約1/10の感度・W/E/R連動",
+            icon='INFO',
+        )
+
         layout.separator()
 
         layout.label(
-            text="Mode",
+            text="Interaction Mode",
             icon='OBJECT_DATAMODE',
         )
 
-        current_mode = get_current_interaction_mode(context)
+        current_mode = _interaction_mode_id(context.mode)
 
         for mode_id, label in (
             ('OBJECT', "Object Mode"),
@@ -2758,7 +2832,8 @@ class SCREEN_OT_maya_keyframe_jump(bpy.types.Operator):
 
 
 # ============================================================
-# Alt+* = トランスフォーム初期化
+# Alt+* = トランスフォーム初期化 /
+#          選択キーフレームのデフォルト化
 # ============================================================
 
 class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
@@ -2766,168 +2841,159 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
     bl_label = "トランスフォームを初期化 (Maya Alt+*)"
     bl_options = {'REGISTER', 'UNDO'}
 
-    # --------------------------------------------------------
-    # 選択キーフレームのリセット
-    # （グラフエディター / ドープシートで発動）
-    # --------------------------------------------------------
-
-    _KEYFRAME_RESET_AREAS = {
+    _ANIM_EDITOR_AREA_TYPES = {
         'GRAPH_EDITOR',
         'DOPESHEET_EDITOR',
     }
 
+    # --------------------------------------------------------
+    # 選択キーフレームのデフォルト化
+    # --------------------------------------------------------
+
     @staticmethod
-    def _keyframe_default_value(data_path, array_index):
-        """トランスフォームチャンネルのデフォルト値を返す。
-        トランスフォーム以外のチャンネルはNone（対象外）。"""
+    def _default_channel_value(data_path, array_index):
+        """トランスフォーム系チャンネルのデフォルト値を返す。
+        対象外のチャンネルは None を返す。
+        pose.bones["..."].location のようなパスにも対応する。
+        """
         if not data_path:
             return None
 
-        channel = data_path.rsplit('.', 1)[-1]
-
-        if channel in {
-            "location",
-            "delta_location",
-            "rotation_euler",
-            "delta_rotation_euler",
-        }:
-            return 0.0
-
-        if channel in {
-            "rotation_quaternion",
-            "delta_rotation_quaternion",
-        }:
+        if data_path.endswith("rotation_quaternion"):
             return 1.0 if array_index == 0 else 0.0
 
-        if channel == "rotation_axis_angle":
-            # (angle, x, y, z) → デフォルト軸はY
+        if data_path.endswith("rotation_axis_angle"):
+            # デフォルト (0.0, 0.0, 1.0, 0.0)
             return 1.0 if array_index == 2 else 0.0
 
-        if channel in {"scale", "delta_scale"}:
+        if data_path.endswith("scale"):
+            # scale / delta_scale
             return 1.0
+
+        if data_path.endswith("location"):
+            # location / delta_location
+            return 0.0
+
+        if data_path.endswith("rotation_euler"):
+            # rotation_euler / delta_rotation_euler
+            return 0.0
 
         return None
 
     @staticmethod
-    def _collect_target_fcurves(context):
+    def _collect_anim_fcurves(context):
         fcurves = []
 
-        # アニメーションエディターのcontextから直接取得できる場合は
-        # それを最優先する（表示・フィルタ状態と一致するため）。
-        for attribute in ("editable_fcurves", "visible_fcurves"):
-            try:
-                values = getattr(context, attribute, None)
+        try:
+            fcurves = list(context.editable_fcurves or [])
+        except Exception:
+            fcurves = []
 
-                if values:
-                    fcurves = list(values)
-                    break
+        if not fcurves:
+            try:
+                fcurves = list(context.visible_fcurves or [])
+            except Exception:
+                fcurves = []
+
+        if not fcurves:
+            objects = set()
+
+            try:
+                objects.update(context.selected_objects or [])
             except Exception:
                 pass
 
-        if fcurves:
-            return fcurves
+            try:
+                if context.active_object is not None:
+                    objects.add(context.active_object)
+            except Exception:
+                pass
 
-        # フォールバック: 選択オブジェクトのアクションから収集。
-        objects = set()
+            for obj in objects:
+                anim = getattr(obj, "animation_data", None)
 
-        try:
-            objects.update(context.selected_objects or [])
-        except Exception:
-            pass
+                if anim is None or anim.action is None:
+                    continue
 
-        try:
-            if context.active_object is not None:
-                objects.add(context.active_object)
-        except Exception:
-            pass
+                try:
+                    fcurves.extend(anim.action.fcurves)
+                except Exception:
+                    pass
 
-        actions = {}
+        return [
+            fcurve
+            for fcurve in fcurves
+            if (
+                not getattr(fcurve, "lock", False) and
+                not getattr(fcurve, "hide", False)
+            )
+        ]
 
-        for obj in objects:
-            anim = getattr(obj, "animation_data", None)
+    def _execute_selected_keyframe_reset(self, context):
+        """選択中のキーフレームだけをデフォルト値に戻す。
+        現在フレーム上のキーでも、選択されていなければ触らない。
+        ハンドルは同じ差分で移動させ、カーブ形状を保つ。
+        """
+        key_count = 0
+        curve_count = 0
+        skipped_channel_count = 0
 
-            if anim is None or anim.action is None:
+        for fcurve in self._collect_anim_fcurves(context):
+            try:
+                selected_points = [
+                    keyframe_point
+                    for keyframe_point in fcurve.keyframe_points
+                    if keyframe_point.select_control_point
+                ]
+            except Exception:
                 continue
 
-            try:
-                actions[anim.action.as_pointer()] = anim.action
-            except Exception:
-                pass
-
-        for action in actions.values():
-            try:
-                fcurves.extend(action.fcurves)
-            except Exception:
-                pass
-
-        return fcurves
-
-    def _reset_selected_keyframes(self, context):
-        """選択中のキーフレームをデフォルト値へ戻す。
-        選択キーが1つも無ければNoneを返し、呼び出し側で
-        従来のリセット処理にフォールバックさせる。
-        選択されていないキーには一切触れない。"""
-        fcurves = self._collect_target_fcurves(context)
-
-        reset_count = 0
-        channel_count = 0
-
-        for fcurve in fcurves:
-            if getattr(fcurve, "lock", False):
+            if not selected_points:
                 continue
 
-            default = self._keyframe_default_value(
+            default_value = self._default_channel_value(
                 getattr(fcurve, "data_path", ""),
                 getattr(fcurve, "array_index", 0),
             )
 
-            if default is None:
+            if default_value is None:
+                # トランスフォーム以外のチャンネルは対象外。
+                skipped_channel_count += 1
                 continue
 
-            try:
-                points = fcurve.keyframe_points
-            except Exception:
-                continue
-
-            changed = False
-
-            for keyframe_point in points:
-                if not getattr(
-                    keyframe_point,
-                    "select_control_point",
-                    False,
-                ):
-                    continue
-
+            for keyframe_point in selected_points:
                 try:
-                    delta_y = default - keyframe_point.co.y
+                    delta = default_value - keyframe_point.co.y
 
-                    keyframe_point.co.y = default
-                    keyframe_point.handle_left.y += delta_y
-                    keyframe_point.handle_right.y += delta_y
-                except Exception:
-                    continue
+                    keyframe_point.co.y = default_value
+                    keyframe_point.handle_left.y += delta
+                    keyframe_point.handle_right.y += delta
 
-                reset_count += 1
-                changed = True
-
-            if changed:
-                channel_count += 1
-
-                try:
-                    fcurve.update()
+                    key_count += 1
                 except Exception:
                     pass
 
-        if reset_count == 0:
-            return None
+            try:
+                fcurve.update()
+            except Exception:
+                pass
 
-        # 変更をシーン評価へ反映する。
-        try:
-            scene = context.scene
-            scene.frame_set(scene.frame_current)
-        except Exception:
-            pass
+            curve_count += 1
+
+        if key_count == 0:
+            if skipped_channel_count > 0:
+                self.report(
+                    {'INFO'},
+                    "選択キーフレームはトランスフォーム系"
+                    "チャンネルではないため対象外です。",
+                )
+            else:
+                self.report(
+                    {'INFO'},
+                    "デフォルト化できる選択キーフレームが"
+                    "ありません。",
+                )
+            return {'CANCELLED'}
 
         try:
             for area in context.window.screen.areas:
@@ -2941,17 +3007,22 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
         except Exception:
             pass
 
-        self.report(
-            {'INFO'},
-            f"選択中の {reset_count} 個のキーフレーム"
-            f"（{channel_count} 本のチャンネル）を"
-            "デフォルト値に戻しました。",
+        message = (
+            f"{curve_count} 本のカーブで {key_count} 個の"
+            "選択キーフレームをデフォルト値に戻しました。"
         )
 
+        if skipped_channel_count > 0:
+            message += (
+                f"（対象外チャンネル {skipped_channel_count} 本は"
+                "スキップ）"
+            )
+
+        self.report({'INFO'}, message)
         return {'FINISHED'}
 
     # --------------------------------------------------------
-    # 従来のリセット処理（現在値のリセット）
+    # 従来のトランスフォーム初期化
     # --------------------------------------------------------
 
     @staticmethod
@@ -3132,23 +3203,20 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
         return inserted
 
     def execute(self, context):
-        # グラフエディター / ドープシート上で実行された場合は、
-        # 選択中のキーフレームをデフォルトへ戻すモードを優先する。
-        # 選択キーが無い場合のみ従来のリセットへフォールバック。
-        area_type = None
+        # アニメーションエディター上で実行された場合は、
+        # 「選択キーフレームのデフォルト化」モードで動作する。
+        area_type = getattr(
+            getattr(context, "area", None),
+            "type",
+            "",
+        )
 
-        try:
-            if context.area is not None:
-                area_type = context.area.type
-        except Exception:
-            pass
+        if area_type in self._ANIM_EDITOR_AREA_TYPES:
+            return self._execute_selected_keyframe_reset(
+                context
+            )
 
-        if area_type in self._KEYFRAME_RESET_AREAS:
-            result = self._reset_selected_keyframes(context)
-
-            if result is not None:
-                return result
-
+        # 以下は従来動作（3D View等での現在値リセット）。
         reset_count = 0
         keyed_count = 0
         autokey = self._autokey_enabled(context)
@@ -4015,6 +4083,11 @@ class VIEW3D_MT_maya_constraint_menu(bpy.types.Menu):
 # クラス登録
 # ============================================================
 
+# 旧バージョンで登録されていて現在は廃止されたクラス名。
+LEGACY_CLASS_NAMES = (
+    "VIEW3D_OT_maya_set_micro_manipulator_mode",
+)
+
 MAYA_SPACE_CLASSES = (
     VIEW3D_OT_maya_set_transform_orientation,
     VIEW3D_OT_maya_toggle_micro_manipulator,
@@ -4036,19 +4109,11 @@ MAYA_SPACE_CLASSES = (
     GRAPH_OT_maya_slide_keys,
 )
 
-# 旧バージョンで登録されていて今回削除したクラス。
-LEGACY_CLASS_NAMES = (
-    "VIEW3D_OT_maya_set_micro_manipulator_mode",
-)
-
 
 def register_maya_space_classes():
+    # 廃止クラスの残骸を先に除去する。
     for class_name in LEGACY_CLASS_NAMES:
-        existing = getattr(
-            bpy.types,
-            class_name,
-            None,
-        )
+        existing = getattr(bpy.types, class_name, None)
 
         if existing is not None:
             try:
@@ -4266,8 +4331,7 @@ def setup_maya_keymap_fixed():
 
     # --------------------------------------------------------
     # Q / W / E / R
-    # Qは cycle=False で「矩形選択に固定」する。
-    # （連打しても投げ縄 / サークル選択へ切り替わらない）
+    # Q は cycle=False を明示して矩形選択に固定する。
     # --------------------------------------------------------
 
     qwer_defs = (
@@ -4542,6 +4606,29 @@ def setup_maya_keymap_fixed():
             repeat=False,
         )
 
+    # グラフエディター / ドープシートでもAlt+*を有効化し、
+    # 選択キーフレームのデフォルト化として動作させる。
+    for km_target in (
+        km_graph,
+        km_dopesheet,
+    ):
+        add_binding(
+            km_target,
+            'object.maya_reset_transforms',
+            'NUMPAD_ASTERIX',
+            alt=True,
+            repeat=False,
+        )
+
+        add_binding(
+            km_target,
+            'object.maya_reset_transforms',
+            'EIGHT',
+            alt=True,
+            shift=True,
+            repeat=False,
+        )
+
     # --------------------------------------------------------
     # F = フォーカス
     # --------------------------------------------------------
@@ -4652,6 +4739,12 @@ def setup_maya_keymap_fixed():
     )
 
     # --------------------------------------------------------
+    # Q = 矩形選択固定（全キーマップのcycleを除去）
+    # --------------------------------------------------------
+
+    force_q_select_box_no_cycle(kc)
+
+    # --------------------------------------------------------
     # プリセット保存
     # --------------------------------------------------------
 
@@ -4699,12 +4792,12 @@ def setup_maya_keymap_fixed():
     print("   F: 選択対象へフォーカス")
     print("   Space単押し: 1画面 / 4分割 トグル")
     print("   Space長押し: Hotbox風パイメニュー")
-    print("   Q: 矩形選択に固定（連打してもツールが切り替わらない）")
+    print("   Q: 矩形選択に固定（連打しても切り替わりません）")
     print("")
-    print("   ▼ Manipulator / Mode:")
-    print("   Ctrl+Shift+右クリック: Manipulator Settings")
+    print("   ▼ Manipulator Settings:")
+    print("   Ctrl+Shift+右クリック: 設定メニュー")
     print("      ・Global / Local / Gimbal")
-    print("      ・Micro Manipulator ON / OFF（常にW/E/R連動）")
+    print("      ・Micro Manipulator ON / OFF（W/E/R連動）")
     print("      ・Object / Edit / Pose モード切替")
     print("   Micro Manipulator:")
     print("      通常の約1/10感度で高精度操作")
@@ -4716,10 +4809,10 @@ def setup_maya_keymap_fixed():
     print("   Alt+A / Alt+D: 1フレーム移動")
     print("   Alt+1: コントローラー表示 / 非表示")
     print("   Alt+テンキー* または Alt+Shift+8:")
-    print("      3Dビュー上: 選択対象のトランスフォームを初期化")
+    print("      3D View上: 選択対象のトランスフォームを初期化")
     print("      グラフエディター / ドープシート上:")
-    print("         選択中のキーフレームをデフォルト値へ")
-    print("         （未選択のキーには触れません）")
+    print("         選択中のキーフレームだけをデフォルト値へ")
+    print("         （未選択のキーは現在フレーム上でも変更しません）")
     print("")
     print("   ▼ グラフエディター:")
     print("   Shift+中ドラッグ: 軸ロックキー移動")
@@ -4738,3 +4831,4 @@ def setup_maya_keymap_fixed():
 # ============================================================
 
 setup_maya_keymap_fixed()
+
