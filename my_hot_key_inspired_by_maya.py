@@ -2607,6 +2607,97 @@ class VIEW3D_OT_maya_space(bpy.types.Operator):
 
 
 # ============================================================
+# Graph D Key (Tap: Auto Clamped / Hold: Handle Menu)
+# ============================================================
+
+class GRAPH_MT_maya_handle_type_menu(bpy.types.Menu):
+    bl_idname = "GRAPH_MT_maya_handle_type_menu"
+    bl_label = "Handle Type"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.operator("graph.handle_type", text="Free").type = 'FREE'
+        layout.operator("graph.handle_type", text="Aligned").type = 'ALIGNED'
+        layout.operator("graph.handle_type", text="Vector").type = 'VECTOR'
+        layout.operator("graph.handle_type", text="Auto").type = 'AUTO'
+        layout.operator("graph.handle_type", text="Auto Clamped").type = 'AUTO_CLAMPED'
+
+
+class GRAPH_OT_maya_d_key(bpy.types.Operator):
+    bl_idname = "graph.maya_d_key"
+    bl_label = "Maya D Key (Tap: Auto Clamped / Hold: Handle Menu)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    _timer = None
+    _start_time = 0.0
+
+    def invoke(self, context, event):
+        if context.area is None or context.area.type != 'GRAPH_EDITOR':
+            return {'PASS_THROUGH'}
+
+        self._start_time = time.monotonic()
+
+        wm = context.window_manager
+        self._timer = wm.event_timer_add(
+            0.02,
+            window=context.window,
+        )
+
+        wm.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def _remove_timer(self, context):
+        if self._timer is not None:
+            context.window_manager.event_timer_remove(self._timer)
+            self._timer = None
+
+    def modal(self, context, event):
+        if event.type == 'D' and event.value == 'RELEASE':
+            self._remove_timer(context)
+
+            elapsed = time.monotonic() - self._start_time
+
+            if elapsed >= SPACE_HOLD_TIME:
+                self._open_menu(context)
+            else:
+                self._apply_auto_clamped(context)
+
+            return {'FINISHED'}
+
+        if event.type == 'D' and event.value == 'PRESS':
+            return {'RUNNING_MODAL'}
+
+        if event.type == 'TIMER':
+            elapsed = time.monotonic() - self._start_time
+
+            if elapsed >= SPACE_HOLD_TIME:
+                self._remove_timer(context)
+                self._open_menu(context)
+                return {'FINISHED'}
+
+        if event.type in {'ESC', 'RIGHTMOUSE'}:
+            self._remove_timer(context)
+            return {'CANCELLED'}
+
+        return {'RUNNING_MODAL'}
+
+    def _apply_auto_clamped(self, context):
+        try:
+            bpy.ops.graph.handle_type(type='AUTO_CLAMPED')
+        except Exception as e:
+            self.report({'WARNING'}, f"Auto Clampedの適用に失敗しました: {e}")
+
+    def _open_menu(self, context):
+        try:
+            bpy.ops.wm.call_menu(name=GRAPH_MT_maya_handle_type_menu.bl_idname)
+        except Exception as e:
+            self.report({'WARNING'}, f"メニューの表示に失敗しました: {e}")
+
+    def cancel(self, context):
+        self._remove_timer(context)
+
+
+# ============================================================
 # Alt+1 = コントローラー表示切替
 # ============================================================
 
@@ -2937,6 +3028,7 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
         key_count = 0
         curve_count = 0
         skipped_channel_count = 0
+        total_selected_points_count = 0
 
         for fcurve in self._collect_anim_fcurves(context):
             try:
@@ -2950,6 +3042,8 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
 
             if not selected_points:
                 continue
+                
+            total_selected_points_count += len(selected_points)
 
             default_value = self._default_channel_value(
                 getattr(fcurve, "data_path", ""),
@@ -2980,19 +3074,15 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
 
             curve_count += 1
 
+        if total_selected_points_count == 0:
+            return {'PASS_THROUGH'}
+
         if key_count == 0:
-            if skipped_channel_count > 0:
-                self.report(
-                    {'INFO'},
-                    "選択キーフレームはトランスフォーム系"
-                    "チャンネルではないため対象外です。",
-                )
-            else:
-                self.report(
-                    {'INFO'},
-                    "デフォルト化できる選択キーフレームが"
-                    "ありません。",
-                )
+            self.report(
+                {'INFO'},
+                "選択キーフレームはトランスフォーム系"
+                "チャンネルではないため対象外です。",
+            )
             return {'CANCELLED'}
 
         try:
@@ -3212,11 +3302,11 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
         )
 
         if area_type in self._ANIM_EDITOR_AREA_TYPES:
-            return self._execute_selected_keyframe_reset(
-                context
-            )
+            result = self._execute_selected_keyframe_reset(context)
+            if result != {'PASS_THROUGH'}:
+                return result
 
-        # 以下は従来動作（3D View等での現在値リセット）。
+        # 以下は従来動作（3D View等での現在値リセット、またはアニメーションエディターでキー非選択時のフォールバック）。
         reset_count = 0
         keyed_count = 0
         autokey = self._autokey_enabled(context)
@@ -4103,6 +4193,8 @@ MAYA_SPACE_CLASSES = (
     VIEW3D_MT_maya_constraint_menu,
     VIEW3D_MT_maya_hotbox_pie,
     VIEW3D_OT_maya_space,
+    GRAPH_MT_maya_handle_type_menu,
+    GRAPH_OT_maya_d_key,
     VIEW3D_OT_maya_toggle_controllers,
     SCREEN_OT_maya_keyframe_jump,
     OBJECT_OT_maya_reset_transforms,
@@ -4432,6 +4524,13 @@ def setup_maya_keymap_fixed():
     # --------------------------------------------------------
     # グラフエディター
     # --------------------------------------------------------
+
+    add_binding(
+        km_graph,
+        'graph.maya_d_key',
+        'D',
+        repeat=False,
+    )
 
     add_binding(
         km_graph,
@@ -4831,4 +4930,3 @@ def setup_maya_keymap_fixed():
 # ============================================================
 
 setup_maya_keymap_fixed()
-
