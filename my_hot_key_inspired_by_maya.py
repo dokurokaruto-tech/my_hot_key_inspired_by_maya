@@ -10,7 +10,11 @@ import mathutils
 # ============================================================
 
 # 初回実行時は必ず True。
-# 以前のスクリプトで無効化されたキーマップをクリーンに復旧する。
+# 以前のスクリプトで無効化・上書きされたキーマップを
+# クリーンに復旧する。
+#
+# 今回は以前のグラフエディター左マウス設定も削除するため、
+# 修正版を最初に実行するときは必ず True にすること。
 #
 # 注意:
 # 既存のユーザー独自キーマップ変更もリセットされる。
@@ -38,7 +42,7 @@ ALT1_ALSO_TOGGLE_EMPTIES = False
 RESET_DELTA_TRANSFORMS = True
 
 # ------------------------------------------------------------
-# グラフエディタ（Maya風表示・編集）の設定
+# グラフエディターの表示・編集設定
 # ------------------------------------------------------------
 
 # キーフレーム点の描画サイズ（Blenderデフォルトは3。Maya風に大きく）
@@ -432,37 +436,6 @@ def disable_alt_s_keyinsert_conflicts(keyconfig):
     )
 
 
-def disable_graph_lmb_press_select(km_graph):
-    """
-    グラフエディタの左クリック PRESS 選択のうち、
-    こちらで登録し直すもの以外の重複を無効化する。
-
-    PRESS選択とCLICK_DRAGボックス選択は共存できるため、
-    「クリック=選択 / ドラッグ=ボックス選択」の両立が可能。
-    ここでは古い重複項目だけを整理する。
-    """
-
-    disabled_count = 0
-
-    for kmi in km_graph.keymap_items:
-        if kmi.idname != 'graph.clickselect':
-            continue
-
-        if kmi.type != 'LEFTMOUSE':
-            continue
-
-        # any=True の項目はShiftクリック等も奪ってしまうため無効化
-        if kmi.any and kmi.active:
-            kmi.active = False
-            disabled_count += 1
-
-    if disabled_count:
-        print(
-            f"🔇 グラフエディタの重複クリック選択を {disabled_count} 件"
-            "無効化しました。"
-        )
-
-
 # ============================================================
 # スペース=再生の無効化
 # ============================================================
@@ -550,14 +523,14 @@ def setup_maya_style_zoom_direction(preferences):
 
 
 # ============================================================
-# グラフエディタの表示をMaya風にする
+# グラフエディターの表示設定
 # ============================================================
 
 def setup_maya_style_graph_theme(preferences):
     """
     キーフレーム点を大きく描画するようテーマを変更する。
 
-    Mayaのグラフエディタのように、
+    Mayaのグラフエディターのように、
     点が視認しやすく・クリックしやすくなる。
     """
 
@@ -570,7 +543,7 @@ def setup_maya_style_graph_theme(preferences):
     graph_theme = getattr(theme, "graph_editor", None)
 
     if graph_theme is None:
-        print("⚠️ グラフエディタのテーマ設定が見つかりませんでした。")
+        print("⚠️ グラフエディターのテーマ設定が見つかりませんでした。")
         return
 
     try:
@@ -584,23 +557,25 @@ def setup_maya_style_graph_theme(preferences):
         pass
 
     print(
-        f"✅ グラフエディタのキーフレーム点サイズを "
+        f"✅ グラフエディターのキーフレーム点サイズを "
         f"{GRAPH_KEY_VERTEX_SIZE} に拡大しました。"
     )
 
 
 def setup_graph_editor_handle_display():
     """
-    「選択したキーフレームのハンドルだけを表示」を
-    すべてのグラフエディタで有効化する。
+    グラフエディターのハンドル表示を標準状態へ戻す。
 
-    これにより、キーを実際にクリックして選択するまで
-    ハンドルは表示されない（Mayaと同じ挙動）。
+    show_handles:
+        ハンドル表示自体を有効にする。
 
-    注意:
-    この設定はエディター（スペース）単位で保存されるため、
-    スタートアップファイルを保存しておくと
-    新規ファイルにも引き継がれる。
+    use_only_selected_keyframe_handles:
+        False にすることで、選択中キーフレームのハンドルだけに
+        制限せず、未選択キーフレームのハンドルも表示可能にする。
+
+    左クリック／左ドラッグのキーマップはこのスクリプトでは
+    上書きしないため、Industry Compatible標準の操作で
+    ハンドルを直接選択・ドラッグできる。
     """
 
     configured_count = 0
@@ -619,27 +594,29 @@ def setup_graph_editor_handle_display():
                 if getattr(space, "type", None) != 'GRAPH_EDITOR':
                     continue
 
-                try:
-                    space.use_only_selected_keyframe_handles = True
-                    configured_count += 1
-                except Exception:
-                    pass
-
-                # ハンドル表示自体はON
-                # （選択したキーにだけハンドルが出る）
+                # ハンドル表示自体を有効化
                 try:
                     space.show_handles = True
                 except Exception:
                     pass
 
+                # 「選択したキーのハンドルだけ表示」を解除する。
+                # これにより未選択キーのハンドルもつかめる。
+                try:
+                    space.use_only_selected_keyframe_handles = False
+                except Exception:
+                    pass
+
+                configured_count += 1
+
     print(
-        f"✅ {configured_count} 個のグラフエディタで"
-        "「選択キーのみハンドル表示」を有効化しました。"
+        f"✅ {configured_count} 個のグラフエディターで"
+        "ハンドルを常時操作できる標準表示に戻しました。"
     )
 
 
 def _maya_graph_display_load_post(_dummy):
-    """ファイルを開くたびにグラフエディタ表示設定を適用する。"""
+    """ファイルを開くたびにグラフエディターのハンドル表示を復旧する。"""
 
     setup_graph_editor_handle_display()
 
@@ -657,8 +634,8 @@ def register_graph_display_load_handler():
     """
     load_postハンドラーを重複なく登録する。
 
-    別の.blendを開いた後も
-    「選択キーのみハンドル表示」が維持される。
+    別の.blendを開いた後も、
+    ハンドルを直接操作できる状態を維持する。
     """
 
     handlers = bpy.app.handlers.load_post
@@ -896,7 +873,12 @@ def find_view3d_area_region_under_mouse(context, mouse_x, mouse_y):
                 region = region_candidate
                 break
 
-    if region is None and window_regions and mouse_x is not None and mouse_y is not None:
+    if (
+        region is None and
+        window_regions and
+        mouse_x is not None and
+        mouse_y is not None
+    ):
         region = min(
             window_regions,
             key=lambda r: _region_center_distance_sq(r, mouse_x, mouse_y),
@@ -1123,7 +1105,11 @@ def call_menu_pie_for_region(
         region_data=region_data,
     )
 
-    if hasattr(context, "temp_override") and area is not None and region is not None:
+    if (
+        hasattr(context, "temp_override") and
+        area is not None and
+        region is not None
+    ):
         override_variants = []
 
         override_variants.append(dict(kwargs))
@@ -1245,8 +1231,6 @@ class VIEW3D_MT_maya_hotbox_pie(bpy.types.Menu):
         )
 
         # --- 中央（マウスカーソル直下の枠）: ビュー切替 ---
-        # 9個目以降の要素はパイの中央に配置される。
-        # 上側にダミーの隙間を作ってボックスをカーソル付近へ寄せる。
         center = pie.column()
 
         gap = center.column()
@@ -1475,9 +1459,6 @@ class VIEW3D_OT_maya_toggle_controllers(bpy.types.Operator):
             else:
                 space = None
 
-        # グローバル対応:
-        # アウトライナー等の上で押された場合は、
-        # 画面内で最大の3D Viewにフォールバックする。
         if space is None:
             space = find_any_view3d_space(context)
 
@@ -1578,7 +1559,6 @@ class SCREEN_OT_maya_keyframe_jump(bpy.types.Operator):
         """選択オブジェクト群からすべてのキーフレーム時刻を集める。"""
 
         frames = set()
-
         objects = set()
 
         try:
@@ -1609,7 +1589,6 @@ class SCREEN_OT_maya_keyframe_jump(bpy.types.Operator):
 
     def execute(self, context):
         scene = context.scene
-
         frames = self._collect_keyframes(context)
 
         if not frames:
@@ -1665,25 +1644,10 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
     「すべて0にする」のではなく初期状態へ戻す:
         移動:     (0, 0, 0)
         回転:     単位回転（角度0）
-        スケール: (1, 1, 1)  ← 0ではなく1
+        スケール: (1, 1, 1)
 
     Object Mode: 選択オブジェクトすべてが対象。
-                 （設定によりデルタトランスフォームも初期化）
-    Pose Mode:   選択ポーズボーンすべてが対象
-                 （レストポーズに戻る）。
-
-    Auto Keying（自動キー挿入）との連動:
-        タイムラインの Auto Keying が ON のとき:
-            リセット後、現在フレームに自動でキーフレームを挿入する。
-            → リセットした値が保存される。
-        OFF のとき:
-            キーは挿入しない。
-            → 既存のアニメーションがある場合、フレームを移動した
-              時点でリセット結果は破棄される（Mayaと同じ挙動）。
-
-    プロパティへ直接代入する方式のため、
-    コンテキストに依存せず、どのエディター上からでも確実に動く。
-    Undo（Z）で元に戻せる。
+    Pose Mode:   選択ポーズボーンすべてが対象。
     """
 
     bl_idname = "object.maya_reset_transforms"
@@ -1692,18 +1656,13 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
 
     @staticmethod
     def _reset_transform_channels(target, include_delta=False):
-        """
-        オブジェクト / ポーズボーン共通の
-        トランスフォーム初期化処理。
-        """
+        """オブジェクト / ポーズボーン共通の初期化処理。"""
 
         try:
             target.location = (0.0, 0.0, 0.0)
         except Exception:
             pass
 
-        # 回転はモードごとにプロパティが違うため、
-        # すべてデフォルト値に戻しておく。
         try:
             target.rotation_euler = (0.0, 0.0, 0.0)
         except Exception:
@@ -1715,7 +1674,6 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
             pass
 
         try:
-            # (角度, X, Y, Z) デフォルトは角度0 / Y軸
             target.rotation_axis_angle = (0.0, 0.0, 1.0, 0.0)
         except Exception:
             pass
@@ -1725,8 +1683,6 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
         except Exception:
             pass
 
-        # オブジェクトのデルタトランスフォームも初期化する。
-        # （ポーズボーンには存在しないためtry/exceptで安全に処理）
         if include_delta:
             try:
                 target.delta_location = (0.0, 0.0, 0.0)
@@ -1739,7 +1695,12 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
                 pass
 
             try:
-                target.delta_rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+                target.delta_rotation_quaternion = (
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                )
             except Exception:
                 pass
 
@@ -1775,20 +1736,13 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
 
     @classmethod
     def _insert_reset_keys(cls, context, target, include_delta=False):
-        """
-        リセット後の値に対してキーフレームを挿入する
-        （Auto Keying ON のときだけ呼ばれる）。
-
-        戻り値: キーを挿入できたチャンネル数。
-        """
+        """リセット後の値に対してキーフレームを挿入する。"""
 
         try:
             frame = context.scene.frame_current
         except Exception:
             frame = None
 
-        # 環境設定の「Only Insert Available」を尊重する。
-        # （既存のFカーブがあるチャンネルにだけキーを打つ設定）
         options = set()
 
         try:
@@ -1838,7 +1792,6 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
                 if ok:
                     inserted += 1
             except TypeError:
-                # 古いBlenderでoptions引数が使えない場合
                 try:
                     if frame is not None:
                         ok = target.keyframe_insert(
@@ -1853,7 +1806,6 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
                 except Exception:
                     pass
             except Exception:
-                # 存在しないプロパティ（ポーズボーンのdelta等）は無視
                 pass
 
         return inserted
@@ -1861,7 +1813,6 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
     def execute(self, context):
         reset_count = 0
         keyed_count = 0
-
         autokey = self._autokey_enabled(context)
 
         if context.mode == 'POSE':
@@ -1871,7 +1822,6 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
                 self._reset_transform_channels(pose_bone)
                 reset_count += 1
 
-                # Auto Keying ON → リセット値にキーを挿入して保存
                 if autokey:
                     if self._insert_reset_keys(context, pose_bone):
                         keyed_count += 1
@@ -1907,7 +1857,6 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
                 )
                 reset_count += 1
 
-                # Auto Keying ON → リセット値にキーを挿入して保存
                 if autokey:
                     if self._insert_reset_keys(
                         context,
@@ -1953,7 +1902,7 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
 
 
 # ============================================================
-# グラフエディタ: Shift+中ドラッグ = 軸ロックキー移動（Maya風）
+# グラフエディター: Shift+中ドラッグ = 軸ロックキー移動
 # ============================================================
 
 class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
@@ -1963,13 +1912,8 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
     Mayaの Shift+中ドラッグ を再現:
         最初に左右へ動かす → フレーム（時間）のみ移動
         最初に上下へ動かす → 値のみ移動
-    最初に動かした方向で軸が確定し、
-    中ボタンを離すまでその軸に固定される。
 
-    - フレーム移動は整数スナップ（Ctrl押しながらで一時解除）
-    - ESC / 右クリック でキャンセル（元の位置に戻る）
-    - Undo（Z）対応
-    - キーが選択されていない場合は何もせずイベントを素通しする
+    左クリック／左ドラッグの標準操作には干渉しない。
     """
 
     bl_idname = "graph.maya_slide_keys"
@@ -2017,9 +1961,6 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
 
     def invoke(self, context, event):
         region = context.region
-
-        # 選択中キーフレームの元の座標を保存する。
-        # (co, handle_left, handle_right) をFカーブごとに記録。
         self._targets = []
 
         for fcurve in self._collect_editable_fcurves(context):
@@ -2048,12 +1989,9 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
             if originals:
                 self._targets.append((fcurve, originals))
 
-        # キーが選択されていなければイベントを素通しする。
-        # （他の機能を邪魔しない）
         if not self._targets:
             return {'PASS_THROUGH'}
 
-        # 正規化表示中は表示値と実際の値のスケールが異なるため警告。
         space = getattr(context, "space_data", None)
 
         if getattr(space, "use_normalization", False):
@@ -2087,12 +2025,10 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
             self._update(context, event)
             return {'RUNNING_MODAL'}
 
-        # 中ボタンを離した = 確定
         if event.type == 'MIDDLEMOUSE' and event.value == 'RELEASE':
             self._finish(context)
             return {'FINISHED'}
 
-        # ESC / 右クリック = キャンセル（元の位置に戻す）
         if (
             event.type in {'ESC', 'RIGHTMOUSE'} and
             event.value == 'PRESS'
@@ -2101,7 +2037,6 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
             self._finish(context)
             return {'CANCELLED'}
 
-        # Shiftを途中で離しても移動は継続する（Mayaと同じ体感）
         return {'RUNNING_MODAL'}
 
     def _update(self, context, event):
@@ -2116,10 +2051,11 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
         pixel_dx = mouse_x - self._start_region[0]
         pixel_dy = mouse_y - self._start_region[1]
 
-        # 軸がまだ確定していない場合、
-        # 一定距離動いた時点で支配的な方向に固定する。
         if self._axis is None:
-            if max(abs(pixel_dx), abs(pixel_dy)) < SLIDE_AXIS_LOCK_THRESHOLD_PX:
+            if max(
+                abs(pixel_dx),
+                abs(pixel_dy),
+            ) < SLIDE_AXIS_LOCK_THRESHOLD_PX:
                 return
 
             if abs(pixel_dx) >= abs(pixel_dy):
@@ -2138,7 +2074,6 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
         if self._axis == 'FRAME':
             delta_value = 0.0
 
-            # 整数フレームへスナップ（Ctrlで一時解除）
             if SLIDE_SNAP_FRAMES and not event.ctrl:
                 delta_frame = float(round(delta_frame))
         else:
@@ -2148,7 +2083,7 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
         self._set_header(context, delta_frame, delta_value)
 
     def _apply_delta(self, context, delta_frame, delta_value):
-        """保存済みの元座標 + デルタ を全対象キーに適用する。"""
+        """保存済みの元座標 + デルタを全対象キーに適用する。"""
 
         for fcurve, originals in self._targets:
             try:
@@ -2160,8 +2095,6 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
             except Exception:
                 continue
 
-            # 再ソート等で数が合わなくなった場合は
-            # 安全のためこのカーブをスキップする。
             if len(selected) != len(originals):
                 continue
 
@@ -2204,7 +2137,8 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
             context.area.header_text_set(
                 f"キー移動 [{axis_label}]  "
                 f"Frame {delta_frame:+.1f} / Value {delta_value:+.3f}  "
-                "(MMB離す: 確定 / ESC: キャンセル / Ctrl: スナップ解除)"
+                "(MMB離す: 確定 / ESC: キャンセル / "
+                "Ctrl: スナップ解除)"
             )
         except Exception:
             pass
@@ -2226,16 +2160,7 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
 # ============================================================
 
 class VIEW3D_OT_maya_set_view(bpy.types.Operator):
-    """
-    ビューを切り替える（Maya風）。
-
-    - PERSP:       パースペクティブ表示に戻す。
-    - FRONT/BACK/LEFT/RIGHT/TOP/BOTTOM: 各正投影ビュー。
-    - CAMERA_NEW:  現在の視点にカメラを新規作成し、その視点へ入る。
-
-    RegionView3Dへ直接アクセスするため、
-    Hotboxの中央枠からでも確実に動作する。
-    """
+    """ビューを切り替える（Maya風）。"""
 
     bl_idname = "view3d.maya_set_view"
     bl_label = "ビュー切替 (Maya)"
@@ -2243,7 +2168,6 @@ class VIEW3D_OT_maya_set_view(bpy.types.Operator):
 
     view_type: bpy.props.StringProperty(default='PERSP')
 
-    # Blender標準の正投影ビュー回転（w, x, y, z）
     _ORTHO_ROTATIONS = {
         'FRONT': (0.7071068, 0.7071068, 0.0, 0.0),
         'BACK': (0.0, 0.0, 0.7071068, 0.7071068),
@@ -2257,7 +2181,6 @@ class VIEW3D_OT_maya_set_view(bpy.types.Operator):
         view_type = self.view_type
         rv3d = resolve_active_region_view3d(context)
 
-        # --- パースペクティブに戻す ---
         if view_type == 'PERSP':
             if rv3d is None:
                 self.report(
@@ -2274,13 +2197,10 @@ class VIEW3D_OT_maya_set_view(bpy.types.Operator):
             self.report({'INFO'}, "ビュー: Perspective")
             return {'FINISHED'}
 
-        # --- 現在の視点でカメラを新規作成 ---
         if view_type == 'CAMERA_NEW':
             return self._create_camera_from_view(context, rv3d)
 
-        # --- 正投影ビュー（FRONT/BACK/LEFT/RIGHT/TOP/BOTTOM） ---
         if view_type in self._ORTHO_ROTATIONS:
-            # まず標準オペレーターを試す（一番自然な挙動）。
             try:
                 result = bpy.ops.view3d.view_axis(type=view_type)
 
@@ -2290,7 +2210,6 @@ class VIEW3D_OT_maya_set_view(bpy.types.Operator):
             except Exception:
                 pass
 
-            # フォールバック: 回転を直接設定する。
             if rv3d is not None:
                 try:
                     rv3d.view_perspective = 'ORTHO'
@@ -2332,7 +2251,6 @@ class VIEW3D_OT_maya_set_view(bpy.types.Operator):
                 )
                 return {'CANCELLED'}
 
-        # 現在のビュー行列の逆行列 = カメラのワールド行列。
         if rv3d is not None:
             try:
                 cam_obj.matrix_world = rv3d.view_matrix.inverted()
@@ -2344,7 +2262,6 @@ class VIEW3D_OT_maya_set_view(bpy.types.Operator):
         except Exception:
             pass
 
-        # そのカメラ視点へ切り替える。
         if rv3d is not None:
             try:
                 rv3d.view_perspective = 'CAMERA'
@@ -2359,12 +2276,7 @@ class VIEW3D_OT_maya_set_view(bpy.types.Operator):
 
 
 class VIEW3D_OT_maya_look_through_camera(bpy.types.Operator):
-    """
-    指定した名前のカメラの視点に切り替える（Maya風 Look Through）。
-
-    - scene.camera を対象カメラに設定する。
-    - ビューをカメラ視点（'CAMERA'）に切り替える。
-    """
+    """指定した名前のカメラの視点に切り替える。"""
 
     bl_idname = "view3d.maya_look_through_camera"
     bl_label = "カメラ視点へ切替 (Maya)"
@@ -2377,10 +2289,8 @@ class VIEW3D_OT_maya_look_through_camera(bpy.types.Operator):
 
     def execute(self, context):
         scene = context.scene
-
         cam_obj = None
 
-        # まず現在のシーン内から探し、なければ全データから探す。
         try:
             cam_obj = scene.objects.get(self.camera_name)
         except Exception:
@@ -2421,7 +2331,6 @@ class VIEW3D_OT_maya_look_through_camera(bpy.types.Operator):
                 "3D Viewが見つからないため、シーンカメラのみ変更しました。",
             )
 
-        # 再描画
         try:
             for area in context.window.screen.areas:
                 if area.type == 'VIEW_3D':
@@ -2486,7 +2395,6 @@ class VIEW3D_MT_maya_view_menu(bpy.types.Menu):
             text="Bottom",
         ).view_type = 'BOTTOM'
 
-        # --- シーン内のすべてのカメラ（Maya風 Look Through） ---
         cameras = []
 
         try:
@@ -2515,7 +2423,11 @@ class VIEW3D_MT_maya_view_menu(bpy.types.Menu):
                 op = layout.operator(
                     "view3d.maya_look_through_camera",
                     text=cam_obj.name,
-                    icon='VIEW_CAMERA' if is_active else 'OUTLINER_OB_CAMERA',
+                    icon=(
+                        'VIEW_CAMERA'
+                        if is_active
+                        else 'OUTLINER_OB_CAMERA'
+                    ),
                 )
                 op.camera_name = cam_obj.name
 
@@ -2541,7 +2453,6 @@ class VIEW3D_MT_maya_spawn_menu(bpy.types.Menu):
     def draw(self, context):
         layout = self.layout
 
-        # --- メッシュプリミティブ ---
         layout.operator(
             "mesh.primitive_plane_add",
             text="Plane",
@@ -2585,7 +2496,6 @@ class VIEW3D_MT_maya_spawn_menu(bpy.types.Menu):
 
         layout.separator()
 
-        # --- その他のオブジェクト ---
         layout.operator(
             "object.empty_add",
             text="Empty",
@@ -2618,14 +2528,7 @@ class VIEW3D_MT_maya_spawn_menu(bpy.types.Menu):
 # ============================================================
 
 class OBJECT_OT_maya_add_constraint(bpy.types.Operator):
-    """
-    Maya流にコンストレイントを追加する。
-
-    Maya: 先にターゲット（駆動側）を選び、
-          最後に拘束される側（アクティブ）を選ぶ。
-    → アクティブオブジェクトにコンストレイントを追加し、
-       他に選択されているオブジェクトをターゲットに設定する。
-    """
+    """Maya流にコンストレイントを追加する。"""
 
     bl_idname = "object.maya_add_constraint"
     bl_label = "コンストレイント追加 (Maya)"
@@ -2643,7 +2546,6 @@ class OBJECT_OT_maya_add_constraint(bpy.types.Operator):
             )
             return {'CANCELLED'}
 
-        # アクティブ以外の選択オブジェクト = ターゲット候補。
         targets = [
             obj for obj in (context.selected_objects or [])
             if obj != active
@@ -2778,24 +2680,22 @@ def register_maya_space_classes():
 def setup_maya_keymap_fixed():
     preferences = bpy.context.preferences
 
-    # Alt+左クリックとの衝突を防ぐため、先にOFFにする。
     preferences.inputs.use_mouse_emulate_3_button = False
 
-    # Alt+右ドラッグのズーム方向をMayaに揃える。
     setup_maya_style_zoom_direction(preferences)
 
-    # グラフエディタの表示をMaya風にする。
+    # グラフエディター設定:
     #   1) キーフレーム点を大きく描画
-    #   2) 選択したキーのハンドルだけ表示
-    #   3) 別ファイルを開いても 2) が維持されるようハンドラー登録
+    #   2) すべてのハンドルを表示・操作可能にする
+    #   3) 左クリック／左ドラッグは標準キーマップを維持する
     setup_maya_style_graph_theme(preferences)
     setup_graph_editor_handle_display()
     register_graph_display_load_handler()
 
-    # スペースキー用のオペレーターとパイメニューを登録。
     register_maya_space_classes()
 
-    # 以前のスクリプトで壊れた状態を一度復旧する。
+    # 以前のスクリプトで登録したグラフエディターの
+    # 左クリック／左ドラッグ設定も、ここで一度リセットされる。
     if RESET_TO_CLEAN_INDUSTRY_BASE:
         activate_clean_industry_keymap()
 
@@ -2823,13 +2723,7 @@ def setup_maya_keymap_fixed():
     # グローバルキーポリシーの適用
     # --------------------------------------------------------
 
-    # Z / Alt+Q / Alt+A / Alt+D / Alt+W / Alt+S / Alt+1 / Alt+*
-    # について、全エディターの競合割り当てを一括で無効化する。
-    # これにより「ビューポートでは効くのに
-    # グラフエディタでは別の機能が動く」問題がなくなる。
     apply_global_key_policies(kc)
-
-    # Alt+Sでキーフレーム挿入が誤発動する問題への個別対策。
     disable_alt_s_keyinsert_conflicts(kc)
 
     # --------------------------------------------------------
@@ -2847,8 +2741,6 @@ def setup_maya_keymap_fixed():
         "Screen",
     )
 
-    # 「Window」キーマップは全エディター共通で常に効く。
-    # グローバルキーの受け皿として使う。
     km_window = get_keymap(
         kc,
         "Window",
@@ -2869,7 +2761,6 @@ def setup_maya_keymap_fixed():
         "Mesh",
     )
 
-    # アニメーションエディター
     km_dopesheet = get_keymap(
         kc,
         "Dopesheet",
@@ -2888,7 +2779,6 @@ def setup_maya_keymap_fixed():
         space_type='NLA_EDITOR',
     )
 
-    # 2Dエディター共通ナビゲーション
     km_view2d = get_keymap(
         kc,
         "View2D",
@@ -2902,21 +2792,15 @@ def setup_maya_keymap_fixed():
     )
 
     # --------------------------------------------------------
-    # グローバルキー（Windowキーマップ = どこでも有効）
+    # グローバルキー
     # --------------------------------------------------------
 
-    # エディター固有の競合はapply_global_key_policiesで
-    # 無効化済みなので、ここに登録すれば
-    # カーソルがどこにあっても確実に効く。
-
-    # Z = Undo（グラフエディタ/アウトライナー等でも必ずUndo）
     add_binding(
         km_window,
         'ed.undo',
         'Z',
     )
 
-    # Alt+Q = 再生 / 停止
     add_binding(
         km_window,
         'screen.animation_play',
@@ -2925,8 +2809,6 @@ def setup_maya_keymap_fixed():
         repeat=False,
     )
 
-    # Alt+W / Alt+S = キーフレームジャンプ
-    # Alt+A / Alt+D = 1フレーム移動
     global_anim_defs = (
         ('W', 'screen.maya_keyframe_jump', {'next': False}),
         ('S', 'screen.maya_keyframe_jump', {'next': True}),
@@ -2943,8 +2825,6 @@ def setup_maya_keymap_fixed():
             properties=properties,
         )
 
-    # Alt+1 = コントローラー表示切替
-    # （3D View以外の上で押した場合は最大の3D Viewに効く）
     add_binding(
         km_window,
         'view3d.maya_toggle_controllers',
@@ -2953,11 +2833,6 @@ def setup_maya_keymap_fixed():
         repeat=False,
     )
 
-    # Alt+* = トランスフォーム初期化
-    #   1) Alt + テンキーの*
-    #   2) Alt + Shift + 8（US配列の*。テンキーなしキーボード用）
-    # ※ JIS配列フルキーの「*」(Shift+:)はBlenderのキーイベントに
-    #    確実に対応していないため、テンキーの*を推奨。
     add_binding(
         km_window,
         'object.maya_reset_transforms',
@@ -3001,23 +2876,17 @@ def setup_maya_keymap_fixed():
     # W / E / R / F（アニメーションエディター系）
     # --------------------------------------------------------
 
-    # アニメーションエディターにはツールバーがないため、
-    # ツール切替ではなくトランスフォームオペレーターを直接呼ぶ。
-    # これでビューポートと同じ指癖のまま
-    # キーフレーム/ストリップを操作できる。
-
-    # Graph Editor: W/E/R = 移動 / 回転 / スケール
     add_binding(km_graph, 'transform.translate', 'W')
     add_binding(km_graph, 'transform.rotate', 'E')
     add_binding(km_graph, 'transform.resize', 'R')
 
-    # Dopesheet: W = 時間移動 / R = 時間スケール
     add_binding(
         km_dopesheet,
         'transform.transform',
         'W',
         properties={'mode': 'TIME_TRANSLATE'},
     )
+
     add_binding(
         km_dopesheet,
         'transform.transform',
@@ -3025,13 +2894,13 @@ def setup_maya_keymap_fixed():
         properties={'mode': 'TIME_SCALE'},
     )
 
-    # NLA: W = ストリップ移動 / R = 時間スケール
     add_binding(
         km_nla,
         'transform.transform',
         'W',
         properties={'mode': 'TRANSLATION'},
     )
+
     add_binding(
         km_nla,
         'transform.transform',
@@ -3039,90 +2908,31 @@ def setup_maya_keymap_fixed():
         properties={'mode': 'TIME_SCALE'},
     )
 
-    # F = 選択にフォーカス（各アニメーションエディター）
     add_binding(km_graph, 'graph.view_selected', 'F')
     add_binding(km_dopesheet, 'action.view_selected', 'F')
     add_binding(km_nla, 'nla.view_selected', 'F')
 
     # --------------------------------------------------------
-    # グラフエディタ: Maya風キーフレーム選択と編集
+    # グラフエディターの左マウス操作
     # --------------------------------------------------------
 
-    # 重複するクリック選択（any=True）の整理。
-    disable_graph_lmb_press_select(km_graph)
+    # 重要:
+    # graph.clickselect や graph.select_box のLEFTMOUSE設定は
+    # このスクリプトでは一切上書きしない。
+    #
+    # Industry Compatible標準の左クリック／左ドラッグを維持するため、
+    # キーフレーム点やベジェハンドルを直接つかんでドラッグできる。
+    #
+    # 以前のバージョンに存在した以下の独自設定は削除済み:
+    #   ・左クリック = graph.clickselect
+    #   ・左ドラッグ = graph.select_box（tweak=False）
+    #   ・Shift/Ctrl付き左ドラッグの独自ボックス選択
+    #
+    # 修正版を初めて実行するときは、
+    # RESET_TO_CLEAN_INDUSTRY_BASE=True にして旧設定を消すこと。
 
-    # クリック = キーフレーム点を選択。
-    # 空クリックで全選択解除（Maya風）。
-    # PRESS選択とCLICK_DRAGボックス選択は共存できるため、
-    # 「押した瞬間に選択 → そのままドラッグでボックス選択」が成立する。
-    add_binding(
-        km_graph,
-        'graph.clickselect',
-        'LEFTMOUSE',
-        properties={
-            'extend': False,
-            'deselect_all': True,
-        },
-    )
-
-    # Shift+クリック = 追加選択
-    add_binding(
-        km_graph,
-        'graph.clickselect',
-        'LEFTMOUSE',
-        shift=True,
-        properties={
-            'extend': True,
-        },
-    )
-
-    # 左ドラッグ = ボックス選択（複数キーを一気に選択）
-    add_binding(
-        km_graph,
-        'graph.select_box',
-        'LEFTMOUSE',
-        value='CLICK_DRAG',
-        properties={
-            'mode': 'SET',
-            'include_handles': False,
-            'tweak': False,
-            'wait_for_input': False,
-        },
-    )
-
-    # Shift+左ドラッグ = ボックス追加選択
-    add_binding(
-        km_graph,
-        'graph.select_box',
-        'LEFTMOUSE',
-        value='CLICK_DRAG',
-        shift=True,
-        properties={
-            'mode': 'ADD',
-            'include_handles': False,
-            'tweak': False,
-            'wait_for_input': False,
-        },
-    )
-
-    # Ctrl+左ドラッグ = ボックス選択解除
-    add_binding(
-        km_graph,
-        'graph.select_box',
-        'LEFTMOUSE',
-        value='CLICK_DRAG',
-        ctrl=True,
-        properties={
-            'mode': 'SUB',
-            'include_handles': False,
-            'tweak': False,
-            'wait_for_input': False,
-        },
-    )
-
-    # Shift+中ドラッグ = 軸ロックキー移動
-    #   最初に左右へ動かす → フレームのみ移動（整数スナップ）
-    #   最初に上下へ動かす → 値のみ移動
+    # Shift+中ドラッグだけは追加のMaya風機能として残す。
+    # 左マウスによるハンドル操作には干渉しない。
     add_binding(
         km_graph,
         'graph.maya_slide_keys',
@@ -3134,8 +2944,6 @@ def setup_maya_keymap_fixed():
     # 2Dエディター共通: Alt+中/右ドラッグでパン/ズーム
     # --------------------------------------------------------
 
-    # Mayaのグラフエディタ操作の再現。
-    # View2Dキーマップはグラフ/ドープシート/NLA等で共通に効く。
     add_binding(
         km_view2d,
         'view2d.pan',
@@ -3151,12 +2959,9 @@ def setup_maya_keymap_fixed():
     )
 
     # --------------------------------------------------------
-    # アニメーション操作（エディター固有側にも登録して確実化）
+    # アニメーション操作
     # --------------------------------------------------------
 
-    # Windowキーマップより先に評価されるエディター固有側にも
-    # 同じ割り当てを置いておくことで、将来アドオン等が
-    # 競合キーを追加しても意図した動作が優先される。
     anim_defs = (
         ('Z', 'ed.undo', {}, False),
         ('Q', 'screen.animation_play', {}, True),
@@ -3206,7 +3011,7 @@ def setup_maya_keymap_fixed():
         )
 
     # --------------------------------------------------------
-    # スペースキー = Maya式（単押し/長押し）
+    # スペースキー = Maya式
     # --------------------------------------------------------
 
     add_binding(
@@ -3217,7 +3022,7 @@ def setup_maya_keymap_fixed():
     )
 
     # --------------------------------------------------------
-    # Alt+1 / Alt+*（3D View系にも登録して優先度を確保）
+    # Alt+1 / Alt+*
     # --------------------------------------------------------
 
     for km_target in mode_keymaps:
@@ -3255,8 +3060,6 @@ def setup_maya_keymap_fixed():
     # F = 選択対象にフォーカス（3D View系）
     # --------------------------------------------------------
 
-    # Meshキーマップには登録しない。
-    # Edit ModeのF＝面作成を残すため。
     for km_target in (
         km_3d,
         km_object,
@@ -3363,7 +3166,7 @@ def setup_maya_keymap_fixed():
     )
 
     # --------------------------------------------------------
-    # プリセット保存（バックアップのみ）
+    # プリセット保存
     # --------------------------------------------------------
 
     if SAVE_AS_PRESET:
@@ -3393,7 +3196,7 @@ def setup_maya_keymap_fixed():
                 "キーマッププリセットを書き出せませんでした。"
             )
 
-        print(f"✅ キーマッププリセット保存（バックアップ）: {target_file}")
+        print(f"✅ キーマッププリセット保存: {target_file}")
 
     # --------------------------------------------------------
     # 環境設定の保存
@@ -3407,55 +3210,36 @@ def setup_maya_keymap_fixed():
 
     print("🎉 Maya風キーマップの設定が完了しました。")
     print("   Alt+左: 回転 / Alt+中: パン / Alt+右: ズーム")
-    print("   （グラフ/ドープシート/NLAでも Alt+中=パン, Alt+右=ズーム）")
-    print("   F: 選択対象へフォーカス（アニメーションエディター内でも有効）")
+    print("   （グラフ/ドープシート/NLAでも Alt+中=パン、Alt+右=ズーム）")
+    print("   F: 選択対象へフォーカス")
     print("   Space単押し: 1画面 / 4分割 トグル")
     print("   Space長押し: Hotbox風パイメニュー")
-    print("     ・中央の枠 = ビュー切替（Persp/Front/Back/Left/Right/")
-    print("       Top/Bottom/シーン内の全カメラ/New Camera）")
-    print("       → シーンに存在するすべてのカメラが一覧表示され、")
-    print("         選択するとそのカメラの視点に切り替わる")
-    print("     ・北西 = オブジェクト作成（スポーン）")
-    print("     ・北東 = コンストレイント（Parent/Point/Orient/Scale/Aim）")
     print("")
     print("   ▼ 以下はカーソルがどのエディター上にあっても有効:")
-    print("   Z: Undo（グラフエディタ内でも必ずUndo）")
+    print("   Z: Undo")
     print("   Alt+Q: 再生 / 停止")
     print("   Alt+W / Alt+S: 前後のキーフレームへジャンプ")
     print("   Alt+A / Alt+D: 1フレーム移動")
-    print("   Alt+1: コントローラー（ボーン）表示 / 非表示")
-    print("   Alt+テンキー* (または Alt+Shift+8):")
+    print("   Alt+1: コントローラー表示 / 非表示")
+    print("   Alt+テンキー* または Alt+Shift+8:")
     print("      選択対象のトランスフォームを初期化")
-    print("      ※ 移動/回転は0、スケールは1（デフォルト値）に戻る")
-    print("      ※ Pose Modeでは選択ボーンがレストポーズに戻る")
-    print("      ※ Auto Keying が ON のとき: リセット値が現在フレームに")
-    print("         自動でキー挿入され、保存される")
-    print("      ※ Auto Keying が OFF のとき: キーは挿入されず、")
-    print("         既存アニメーションがあればフレーム移動で破棄される")
     print("")
-    print("   ▼ アニメーションエディター内:")
-    print("   W / E / R: キーフレームの移動 / 回転 / スケール")
-    print("      （回転はグラフエディタのみ）")
-    print("")
-    print("   ▼ グラフエディタ（Maya風キーフレーム編集）:")
-    print("   ・キーフレーム点は大きく描画（クリックしやすい）")
-    print("   ・クリック: キーを選択（空クリックで全解除）")
-    print("   ・Shift+クリック: 追加選択")
-    print("   ・左ドラッグ: ボックス選択で複数キーを一気に選択")
-    print("     （Shift+ドラッグ: 追加 / Ctrl+ドラッグ: 解除）")
+    print("   ▼ グラフエディター:")
+    print("   ・キーフレーム点とハンドル端点を大きく表示")
+    print("   ・選択中のキーだけに限定せずハンドルを表示")
+    print("   ・左クリック／左ドラッグはIndustry Compatible標準")
+    print("   ・ベジェハンドルを直接つかんでドラッグ可能")
     print("   ・Shift+中ドラッグ: 最初に動かした方向で軸ロック")
-    print("       左右 → フレームのみ移動（整数スナップ、Ctrlで解除）")
+    print("       左右 → フレームのみ移動")
     print("       上下 → 値のみ移動")
-    print("       中ボタンを離すと確定 / ESCでキャンセル")
-    print("   ・ハンドルは選択したキーフレームにだけ表示される")
     print("")
-    print("ℹ️ 競合していた割り当ては削除ではなく無効化のみ。")
-    print("   Preferences > Keymap > Restore でいつでも復元できます。")
+    print("ℹ️ 修正版を初めて実行するときは、")
+    print("   RESET_TO_CLEAN_INDUSTRY_BASE=True のまま実行してください。")
+    print("   旧スクリプトの左マウス設定が削除されます。")
     print("")
-    print("⚠️ 重要: カスタムオペレーターをBlender再起動後も使うには、")
-    print("   1) このスクリプトをテキストエディターに保存し、")
-    print("      「Register」にチェック → スタートアップファイルを保存")
-    print("   2) またはアドオン化してインストール、のいずれかが必要です。")
+    print("⚠️ カスタムオペレーターをBlender再起動後も使うには、")
+    print("   スクリプトのRegisterを有効にしてスタートアップを保存するか、")
+    print("   アドオン化してインストールしてください。")
 
 
 # 実行
