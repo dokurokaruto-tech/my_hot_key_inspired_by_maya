@@ -1,4 +1,5 @@
 import bpy
+import bmesh
 import os
 import time
 import math
@@ -9,55 +10,63 @@ import mathutils
 # 設定
 # ============================================================
 
-# 初回実行時は必ず True。
-# 以前のスクリプトで無効化・上書きされたキーマップを
-# クリーンに復旧する。
-#
-# 今回は以前のグラフエディター左マウス設定も削除するため、
-# 修正版を最初に実行するときは必ず True にすること。
-#
-# 注意:
-# 既存のユーザー独自キーマップ変更もリセットされる。
 RESET_TO_CLEAN_INDUSTRY_BASE = True
-
-# 実行後にキーマッププリセットとして保存する（バックアップ用途）
 SAVE_AS_PRESET = True
-
-# プリセットの実ファイル名
 PRESET_FILENAME = "my_hot_key_inspired_by_maya.py"
 
-# スペース長押し判定の秒数（Mayaの体感に近い値）
 SPACE_HOLD_TIME = 0.3
-
-# アニメーションエディター（ドープシート/グラフ/NLA）では
-# スペース=再生を残す
 KEEP_SPACE_PLAY_IN_ANIM_EDITORS = True
 
-# Alt+1 のコントローラー表示切替で、
-# ボーンに加えてエンプティも一緒に切り替えるか。
 ALT1_ALSO_TOGGLE_EMPTIES = False
-
-# Alt+* でオブジェクトのデルタトランスフォーム
-# （Delta Location等）も初期化するか。
 RESET_DELTA_TRANSFORMS = True
 
-# ------------------------------------------------------------
-# グラフエディターの表示・編集設定
-# ------------------------------------------------------------
-
-# キーフレーム点の描画サイズ（Blenderデフォルトは3。Maya風に大きく）
 GRAPH_KEY_VERTEX_SIZE = 6
-
-# ハンドル端点の描画サイズ
 GRAPH_HANDLE_VERTEX_SIZE = 5
 
-# Shift+中ドラッグでフレーム方向に動かすとき、
-# 整数フレームへスナップするか（Ctrlを押しながらで一時解除）。
 SLIDE_SNAP_FRAMES = True
-
-# Shift+中ドラッグの軸ロック判定に使うピクセル数。
-# この距離を動いた時点で「フレーム軸」か「値軸」かが確定する。
 SLIDE_AXIS_LOCK_THRESHOLD_PX = 5
+
+# ------------------------------------------------------------
+# Manipulator Orientation / Micro Manipulator
+# ------------------------------------------------------------
+
+# Micro ManipulatorはBlenderの精密変形モードを使用する。
+# 標準変形におけるShift精密操作と同じ、約1/10の感度。
+MICRO_MANIPULATOR_FACTOR = 0.1
+
+# Micro Manipulatorの表示サイズ。
+MICRO_MANIPULATOR_GIZMO_SCALE = 1.0
+
+# Micro Manipulatorで使用可能な方向。
+MICRO_ORIENTATION_TYPES = {
+    'GLOBAL',
+    'LOCAL',
+    'GIMBAL',
+}
+
+# Micro Manipulatorのモード。
+MICRO_MODE_ITEMS = (
+    (
+        'AUTO',
+        "W / E / R 連動",
+        "現在のMove / Rotate / Scaleツールに合わせる",
+    ),
+    (
+        'MOVE',
+        "Move",
+        "移動マニピュレーターを表示する",
+    ),
+    (
+        'ROTATE',
+        "Rotate",
+        "回転マニピュレーターを表示する",
+    ),
+    (
+        'SCALE',
+        "Scale",
+        "スケールマニピュレーターを表示する",
+    ),
+)
 
 
 # ============================================================
@@ -65,8 +74,6 @@ SLIDE_AXIS_LOCK_THRESHOLD_PX = 5
 # ============================================================
 
 def find_industry_compatible_preset():
-    """Industry Compatibleキーマッププリセットのパスを探す。"""
-
     filepath = None
 
     try:
@@ -81,13 +88,13 @@ def find_industry_compatible_preset():
     if filepath:
         return filepath
 
-    # 念のため手動でも探索
     try:
         for directory in bpy.utils.preset_paths("keyconfig"):
             candidate = os.path.join(
                 directory,
                 "Industry_Compatible.py",
             )
+
             if os.path.isfile(candidate):
                 return candidate
     except Exception:
@@ -97,11 +104,6 @@ def find_industry_compatible_preset():
 
 
 def activate_clean_industry_keymap():
-    """
-    Industry Compatibleを有効化し、
-    以前のスクリプトによる壊れたユーザー変更をリセットする。
-    """
-
     filepath = find_industry_compatible_preset()
 
     if not filepath:
@@ -134,8 +136,6 @@ def get_keymap(
     space_type='EMPTY',
     region_type='WINDOW',
 ):
-    """既存キーマップを取得し、なければ作る。"""
-
     km = keyconfig.keymaps.get(name)
 
     if km is None:
@@ -157,15 +157,6 @@ def is_exact_event(
     alt=False,
     oskey=False,
 ):
-    """
-    修飾キーまで完全一致するイベントか判定する。
-
-    重要:
-    any=Trueの項目には触れない。
-    以前のスクリプトはこれを無効化してしまったため、
-    通常のクリックやドラッグまで壊していた。
-    """
-
     if kmi.any:
         return False
 
@@ -187,15 +178,12 @@ def is_exact_event(
     if kmi.oskey != oskey:
         return False
 
-    # 新しいBlenderに存在するHyper修飾キーへの対応
     if getattr(kmi, "hyper", False):
         return False
 
-    # 通常キーを別の修飾キーとして使用している項目は対象外
     if getattr(kmi, "key_modifier", 'NONE') != 'NONE':
         return False
 
-    # 方向付きドラッグは対象外
     if getattr(kmi, "direction", 'ANY') != 'ANY':
         return False
 
@@ -211,11 +199,6 @@ def remove_exact_event(
     alt=False,
     oskey=False,
 ):
-    """
-    指定したキーマップ内だけで、
-    完全一致するイベントを削除する。
-    """
-
     for kmi in list(km.keymap_items):
         if is_exact_event(
             kmi,
@@ -242,13 +225,6 @@ def add_binding(
     repeat=None,
     properties=None,
 ):
-    """
-    完全一致する既存イベントだけを置き換えて登録する。
-
-    default/addon/全エディターを横断して
-    active=Falseにする処理は一切行わない。
-    """
-
     remove_exact_event(
         km,
         event_type,
@@ -275,7 +251,6 @@ def add_binding(
             **arguments,
         )
     except TypeError:
-        # 古いBlender向け
         kmi = km.keymap_items.new(
             operator,
             **arguments,
@@ -305,61 +280,85 @@ def add_binding(
 
 # ============================================================
 # グローバルキーポリシー
-# （どのエディターにカーソルがあっても同じ動作を保証する）
 # ============================================================
 
-# 仕組み:
-#   1) ここに載せたキーについて、全キーマップ（3D View /
-#      Graph Editor / Dopesheet / Outliner / Properties ...）を
-#      走査し、競合する完全一致の割り当てを active=False にする。
-#      （エディター固有キーマップはグローバルより優先されるため、
-#        これをやらないとカーソル位置によって別の機能が発動する）
-#   2) その後、全エディター共通の「Window」キーマップに
-#      目的のオペレーターを登録し直す。
-#
-# 削除ではなく無効化なので、
-# Preferences > Keymap の Restore からいつでも復元できる。
-#
-# 形式: (キー, value, shift, ctrl, alt, 残すオペレーターのセット)
 GLOBAL_KEY_POLICIES = (
-    # Z = Undo（グラフエディタ等の別機能をすべて無効化）
-    ('Z', 'PRESS', False, False, False,
-     {'ed.undo'}),
-
-    # Alt+Q = 再生 / 停止
-    ('Q', 'PRESS', False, False, True,
-     {'screen.animation_play'}),
-
-    # Alt+A / Alt+D = 1フレーム移動
-    ('A', 'PRESS', False, False, True,
-     {'screen.frame_offset'}),
-    ('D', 'PRESS', False, False, True,
-     {'screen.frame_offset'}),
-
-    # Alt+W / Alt+S = キーフレームジャンプ
-    ('W', 'PRESS', False, False, True,
-     {'screen.maya_keyframe_jump'}),
-    ('S', 'PRESS', False, False, True,
-     {'screen.maya_keyframe_jump'}),
-
-    # Alt+1 = コントローラー表示切替
-    ('ONE', 'PRESS', False, False, True,
-     {'view3d.maya_toggle_controllers'}),
-
-    # Alt+* = トランスフォーム初期化
-    ('NUMPAD_ASTERIX', 'PRESS', False, False, True,
-     {'object.maya_reset_transforms'}),
-    ('EIGHT', 'PRESS', True, False, True,
-     {'object.maya_reset_transforms'}),
+    (
+        'Z',
+        'PRESS',
+        False,
+        False,
+        False,
+        {'ed.undo'},
+    ),
+    (
+        'Q',
+        'PRESS',
+        False,
+        False,
+        True,
+        {'screen.animation_play'},
+    ),
+    (
+        'A',
+        'PRESS',
+        False,
+        False,
+        True,
+        {'screen.frame_offset'},
+    ),
+    (
+        'D',
+        'PRESS',
+        False,
+        False,
+        True,
+        {'screen.frame_offset'},
+    ),
+    (
+        'W',
+        'PRESS',
+        False,
+        False,
+        True,
+        {'screen.maya_keyframe_jump'},
+    ),
+    (
+        'S',
+        'PRESS',
+        False,
+        False,
+        True,
+        {'screen.maya_keyframe_jump'},
+    ),
+    (
+        'ONE',
+        'PRESS',
+        False,
+        False,
+        True,
+        {'view3d.maya_toggle_controllers'},
+    ),
+    (
+        'NUMPAD_ASTERIX',
+        'PRESS',
+        False,
+        False,
+        True,
+        {'object.maya_reset_transforms'},
+    ),
+    (
+        'EIGHT',
+        'PRESS',
+        True,
+        False,
+        True,
+        {'object.maya_reset_transforms'},
+    ),
 )
 
 
 def apply_global_key_policies(keyconfig):
-    """
-    GLOBAL_KEY_POLICIESに基づき、
-    競合する割り当てを全キーマップで無効化する。
-    """
-
     disabled_count = 0
 
     for km in keyconfig.keymaps:
@@ -387,6 +386,7 @@ def apply_global_key_policies(keyconfig):
                     if kmi.active:
                         kmi.active = False
                         disabled_count += 1
+
                     break
 
     print(
@@ -396,14 +396,6 @@ def apply_global_key_policies(keyconfig):
 
 
 def disable_alt_s_keyinsert_conflicts(keyconfig):
-    """
-    Alt+S で「キーフレーム挿入」が誤発動する問題への対策。
-
-    any=True または alt=True で S キーに反応する
-    キーフレーム挿入系の項目をピンポイントで無効化する。
-    修飾キーなしの素の S = キー挿入はそのまま残る。
-    """
-
     keyframe_insert_prefixes = (
         'anim.keyframe_insert',
     )
@@ -423,8 +415,6 @@ def disable_alt_s_keyinsert_conflicts(keyconfig):
             if not is_keyframe_insert:
                 continue
 
-            # any=True はすべての修飾キーの組み合わせに反応するため、
-            # Alt+Sも拾ってしまう。alt=True指定のものも同様。
             if kmi.any or kmi.alt:
                 if kmi.active:
                     kmi.active = False
@@ -441,15 +431,6 @@ def disable_alt_s_keyinsert_conflicts(keyconfig):
 # ============================================================
 
 def disable_space_play_bindings(keyconfig):
-    """
-    修飾キーなしの「スペース = screen.animation_play」を
-    すべてのキーマップで無効化する。
-
-    削除ではなく active=False にするだけなので、
-    Preferences > Keymap の Restore からいつでも復元できる。
-    Shift+Space（逆再生）など修飾キー付きの項目には触れない。
-    """
-
     disabled_count = 0
 
     for km in keyconfig.keymaps:
@@ -471,17 +452,7 @@ def disable_space_play_bindings(keyconfig):
 
 
 def restore_space_play_in_anim_editors(keyconfig):
-    """
-    アニメーションエディターにだけ
-    スペース=再生を個別に登録し直す。
-
-    エディター固有キーマップはグローバルより優先されるため、
-    ここに登録すれば確実に効く。
-    """
-
     anim_editor_defs = (
-        # タイムラインはドープシートの一種なので
-        # "Dopesheet" キーマップでカバーされる。
         ("Dopesheet", 'DOPESHEET_EDITOR'),
         ("Graph Editor", 'GRAPH_EDITOR'),
         ("NLA Editor", 'NLA_EDITOR'),
@@ -503,18 +474,10 @@ def restore_space_play_in_anim_editors(keyconfig):
 
 
 # ============================================================
-# Maya式ズーム方向の設定
+# Maya式ズーム方向
 # ============================================================
 
 def setup_maya_style_zoom_direction(preferences):
-    """
-    Alt+右ドラッグのズーム方向をMayaと同じにする。
-
-    Mayaのドリー:
-        右（右下）にドラッグ = 拡大
-        左（左上）にドラッグ = 縮小
-    """
-
     inputs = preferences.inputs
 
     inputs.view_zoom_method = 'DOLLY'
@@ -523,17 +486,10 @@ def setup_maya_style_zoom_direction(preferences):
 
 
 # ============================================================
-# グラフエディターの表示設定
+# グラフエディター表示設定
 # ============================================================
 
 def setup_maya_style_graph_theme(preferences):
-    """
-    キーフレーム点を大きく描画するようテーマを変更する。
-
-    Mayaのグラフエディターのように、
-    点が視認しやすく・クリックしやすくなる。
-    """
-
     try:
         theme = preferences.themes[0]
     except Exception as error:
@@ -563,21 +519,6 @@ def setup_maya_style_graph_theme(preferences):
 
 
 def setup_graph_editor_handle_display():
-    """
-    グラフエディターのハンドル表示を標準状態へ戻す。
-
-    show_handles:
-        ハンドル表示自体を有効にする。
-
-    use_only_selected_keyframe_handles:
-        False にすることで、選択中キーフレームのハンドルだけに
-        制限せず、未選択キーフレームのハンドルも表示可能にする。
-
-    左クリック／左ドラッグのキーマップはこのスクリプトでは
-    上書きしないため、Industry Compatible標準の操作で
-    ハンドルを直接選択・ドラッグできる。
-    """
-
     configured_count = 0
 
     try:
@@ -594,14 +535,11 @@ def setup_graph_editor_handle_display():
                 if getattr(space, "type", None) != 'GRAPH_EDITOR':
                     continue
 
-                # ハンドル表示自体を有効化
                 try:
                     space.show_handles = True
                 except Exception:
                     pass
 
-                # 「選択したキーのハンドルだけ表示」を解除する。
-                # これにより未選択キーのハンドルもつかめる。
                 try:
                     space.use_only_selected_keyframe_handles = False
                 except Exception:
@@ -616,12 +554,9 @@ def setup_graph_editor_handle_display():
 
 
 def _maya_graph_display_load_post(_dummy):
-    """ファイルを開くたびにグラフエディターのハンドル表示を復旧する。"""
-
     setup_graph_editor_handle_display()
 
 
-# persistent装飾（再実行に強いようにtryで包む）
 try:
     _maya_graph_display_load_post = bpy.app.handlers.persistent(
         _maya_graph_display_load_post
@@ -631,13 +566,6 @@ except Exception:
 
 
 def register_graph_display_load_handler():
-    """
-    load_postハンドラーを重複なく登録する。
-
-    別の.blendを開いた後も、
-    ハンドルを直接操作できる状態を維持する。
-    """
-
     handlers = bpy.app.handlers.load_post
 
     for handler in list(handlers):
@@ -651,12 +579,10 @@ def register_graph_display_load_handler():
 
 
 # ============================================================
-# Maya式 Quad View 切り替え用ヘルパー
+# 3D View共通ヘルパー
 # ============================================================
 
 def _point_in_rect(x, y, rx, ry, rw, rh):
-    """ウィンドウ座標 x/y が指定矩形内にあるか。"""
-
     return (
         rx <= x < rx + rw and
         ry <= y < ry + rh
@@ -664,18 +590,16 @@ def _point_in_rect(x, y, rx, ry, rw, rh):
 
 
 def _region_center_distance_sq(region, x, y):
-    """マウス座標からRegion中心までの距離の2乗。"""
-
     cx = region.x + region.width * 0.5
     cy = region.y + region.height * 0.5
+
     dx = cx - x
     dy = cy - y
+
     return dx * dx + dy * dy
 
 
 def _is_region_view3d(value):
-    """値が RegionView3D かどうかを安全に判定する。"""
-
     try:
         return isinstance(value, bpy.types.RegionView3D)
     except Exception:
@@ -683,8 +607,6 @@ def _is_region_view3d(value):
 
 
 def is_view3d_quadview(space):
-    """SpaceView3DがQuad View状態かどうか。"""
-
     if space is None:
         return False
 
@@ -701,8 +623,6 @@ def _make_context_override_kwargs(
     space=None,
     region_data=None,
 ):
-    """context.temp_override用のキーワードを作る。"""
-
     kwargs = {}
 
     window = getattr(context, "window", None)
@@ -737,10 +657,6 @@ def _make_context_override_kwargs(
 
 
 def resolve_region_data_for_region(context, area, region, space):
-    """
-    指定した3D ViewのWINDOW Regionに対応するRegionView3Dを取得する。
-    """
-
     if area is None or region is None or space is None:
         return None
 
@@ -772,7 +688,11 @@ def resolve_region_data_for_region(context, area, region, space):
 
         override_variants = (
             kwargs,
-            {k: v for k, v in kwargs.items() if k != "space_data"},
+            {
+                key: value
+                for key, value in kwargs.items()
+                if key != "space_data"
+            },
         )
 
         for override_kwargs in override_variants:
@@ -798,11 +718,6 @@ def resolve_region_data_for_region(context, area, region, space):
 
 
 def find_view3d_area_region_under_mouse(context, mouse_x, mouse_y):
-    """
-    マウス座標から、3D Viewの Area / WINDOW Region / SpaceView3D /
-    RegionView3D を探す。
-    """
-
     screen = None
 
     try:
@@ -854,8 +769,13 @@ def find_view3d_area_region_under_mouse(context, mouse_x, mouse_y):
         return area, None, space, None
 
     window_regions = [
-        region for region in area.regions
-        if region.type == 'WINDOW' and region.width > 0 and region.height > 0
+        region
+        for region in area.regions
+        if (
+            region.type == 'WINDOW' and
+            region.width > 0 and
+            region.height > 0
+        )
     ]
 
     region = None
@@ -881,7 +801,11 @@ def find_view3d_area_region_under_mouse(context, mouse_x, mouse_y):
     ):
         region = min(
             window_regions,
-            key=lambda r: _region_center_distance_sq(r, mouse_x, mouse_y),
+            key=lambda item: _region_center_distance_sq(
+                item,
+                mouse_x,
+                mouse_y,
+            ),
         )
 
     if region is None:
@@ -898,7 +822,7 @@ def find_view3d_area_region_under_mouse(context, mouse_x, mouse_y):
     if region is None and window_regions:
         region = max(
             window_regions,
-            key=lambda r: r.width * r.height,
+            key=lambda item: item.width * item.height,
         )
 
     region_data = resolve_region_data_for_region(
@@ -912,13 +836,6 @@ def find_view3d_area_region_under_mouse(context, mouse_x, mouse_y):
 
 
 def find_any_view3d_space(context):
-    """
-    画面内で最大の3D ViewのSpaceView3Dを返す。
-
-    Alt+1などをアウトライナー等の上で押した場合の
-    フォールバックとして使う。
-    """
-
     screen = None
 
     try:
@@ -945,30 +862,25 @@ def find_any_view3d_space(context):
 
         size = area.width * area.height
 
-        if size > best_size:
-            try:
-                candidate = area.spaces.active
-            except Exception:
-                continue
+        if size <= best_size:
+            continue
 
-            if (
-                candidate is not None and
-                getattr(candidate, "type", None) == 'VIEW_3D'
-            ):
-                best_space = candidate
-                best_size = size
+        try:
+            candidate = area.spaces.active
+        except Exception:
+            continue
+
+        if (
+            candidate is not None and
+            getattr(candidate, "type", None) == 'VIEW_3D'
+        ):
+            best_space = candidate
+            best_size = size
 
     return best_space
 
 
 def resolve_active_region_view3d(context):
-    """
-    現在のcontextから操作対象のRegionView3Dを取得する共通ヘルパー。
-
-    Hotboxのメニュー項目から呼ばれた場合でも、
-    フォールバックで画面内最大の3D Viewを対象にする。
-    """
-
     rv3d = getattr(context, "region_data", None)
 
     if _is_region_view3d(rv3d):
@@ -985,7 +897,6 @@ def resolve_active_region_view3d(context):
         except Exception:
             pass
 
-    # フォールバック: 画面内で最大の3D View
     space = find_any_view3d_space(context)
 
     if space is not None:
@@ -1001,8 +912,6 @@ def resolve_active_region_view3d(context):
 
 
 def copy_region_view3d_state(src, dst):
-    """RegionView3Dの視点状態をコピーする。"""
-
     if src is None or dst is None:
         return
 
@@ -1042,10 +951,6 @@ def call_region_quadview_for_region(
     space,
     region_data,
 ):
-    """
-    指定した3D View Regionを対象に screen.region_quadview を実行する。
-    """
-
     if area is None or region is None:
         return bpy.ops.screen.region_quadview()
 
@@ -1095,8 +1000,6 @@ def call_menu_pie_for_region(
     space,
     region_data,
 ):
-    """指定した3D View Region上でパイメニューを呼ぶ。"""
-
     kwargs = _make_context_override_kwargs(
         context,
         area=area,
@@ -1145,14 +1048,1246 @@ def call_menu_pie_for_region(
     )
 
 
+def tag_all_view3d_redraw():
+    try:
+        screens = bpy.data.screens
+    except Exception:
+        return
+
+    for screen in screens:
+        for area in screen.areas:
+            if area.type == 'VIEW_3D':
+                try:
+                    area.tag_redraw()
+                except Exception:
+                    pass
+
+
+def iter_view3d_spaces():
+    try:
+        screens = bpy.data.screens
+    except Exception:
+        return
+
+    for screen in screens:
+        for area in screen.areas:
+            if area.type != 'VIEW_3D':
+                continue
+
+            for space in area.spaces:
+                if getattr(space, "type", None) == 'VIEW_3D':
+                    yield space
+
+
 # ============================================================
-# Mayaスペースキー再現
-# （単押し = 1画面/4分割トグル、長押し = Hotbox風パイメニュー）
+# Transform Orientation / Micro Manipulator
+# ============================================================
+
+def get_current_transform_orientation(context):
+    try:
+        orientation = context.scene.transform_orientation_slots[0].type
+    except Exception:
+        orientation = 'GLOBAL'
+
+    if orientation not in MICRO_ORIENTATION_TYPES:
+        return 'GLOBAL'
+
+    return orientation
+
+
+def set_transform_orientation(context, orientation):
+    if orientation not in MICRO_ORIENTATION_TYPES:
+        orientation = 'GLOBAL'
+
+    try:
+        context.scene.transform_orientation_slots[0].type = orientation
+    except Exception as error:
+        print(
+            f"⚠️ Transform Orientationを設定できませんでした: {error}"
+        )
+        return False
+
+    tag_all_view3d_redraw()
+    return True
+
+
+def restore_maya_micro_space_visibility():
+    wm = getattr(bpy.context, "window_manager", None)
+
+    if wm is None:
+        return
+
+    try:
+        owned = bool(wm.maya_micro_visibility_owned)
+    except Exception:
+        owned = False
+
+    if not owned:
+        return
+
+    try:
+        previous_show_gizmo = bool(
+            wm.maya_micro_previous_show_gizmo
+        )
+    except Exception:
+        previous_show_gizmo = True
+
+    try:
+        previous_show_gizmo_tool = bool(
+            wm.maya_micro_previous_show_gizmo_tool
+        )
+    except Exception:
+        previous_show_gizmo_tool = True
+
+    try:
+        previous_show_gizmo_context = bool(
+            wm.maya_micro_previous_show_gizmo_context
+        )
+    except Exception:
+        previous_show_gizmo_context = True
+
+    for space in iter_view3d_spaces():
+        try:
+            space.show_gizmo = previous_show_gizmo
+        except Exception:
+            pass
+
+        try:
+            space.show_gizmo_tool = previous_show_gizmo_tool
+        except Exception:
+            pass
+
+        try:
+            space.show_gizmo_context = previous_show_gizmo_context
+        except Exception:
+            pass
+
+    try:
+        wm.maya_micro_visibility_owned = False
+    except Exception:
+        pass
+
+    tag_all_view3d_redraw()
+
+
+def apply_maya_micro_space_visibility(context, enabled):
+    wm = getattr(context, "window_manager", None)
+
+    if wm is None:
+        return
+
+    if not enabled:
+        restore_maya_micro_space_visibility()
+        return
+
+    try:
+        owned = bool(wm.maya_micro_visibility_owned)
+    except Exception:
+        owned = False
+
+    if not owned:
+        source_space = getattr(context, "space_data", None)
+
+        if (
+            source_space is None or
+            getattr(source_space, "type", None) != 'VIEW_3D'
+        ):
+            source_space = find_any_view3d_space(context)
+
+        if source_space is None:
+            try:
+                source_space = next(iter(iter_view3d_spaces()))
+            except Exception:
+                source_space = None
+
+        if source_space is not None:
+            try:
+                wm.maya_micro_previous_show_gizmo = bool(
+                    source_space.show_gizmo
+                )
+            except Exception:
+                wm.maya_micro_previous_show_gizmo = True
+
+            try:
+                wm.maya_micro_previous_show_gizmo_tool = bool(
+                    source_space.show_gizmo_tool
+                )
+            except Exception:
+                wm.maya_micro_previous_show_gizmo_tool = True
+
+            try:
+                wm.maya_micro_previous_show_gizmo_context = bool(
+                    source_space.show_gizmo_context
+                )
+            except Exception:
+                wm.maya_micro_previous_show_gizmo_context = True
+
+        try:
+            wm.maya_micro_visibility_owned = True
+        except Exception:
+            pass
+
+    for space in iter_view3d_spaces():
+        try:
+            space.show_gizmo = True
+        except Exception:
+            pass
+
+        # Blender標準のツールギズモを隠し、
+        # Micro Manipulatorとの重複クリックを防ぐ。
+        try:
+            space.show_gizmo_tool = False
+        except Exception:
+            pass
+
+        # カスタムのPersistent GizmoGroupを表示する。
+        try:
+            space.show_gizmo_context = True
+        except Exception:
+            pass
+
+    tag_all_view3d_redraw()
+
+
+def register_maya_runtime_properties():
+    property_names = (
+        "maya_micro_manipulator_enabled",
+        "maya_micro_manipulator_mode",
+        "maya_micro_visibility_owned",
+        "maya_micro_previous_show_gizmo",
+        "maya_micro_previous_show_gizmo_tool",
+        "maya_micro_previous_show_gizmo_context",
+    )
+
+    for property_name in property_names:
+        if hasattr(bpy.types.WindowManager, property_name):
+            try:
+                delattr(
+                    bpy.types.WindowManager,
+                    property_name,
+                )
+            except Exception:
+                pass
+
+    bpy.types.WindowManager.maya_micro_manipulator_enabled = (
+        bpy.props.BoolProperty(
+            name="Micro Manipulator",
+            description=(
+                "約1/10の感度で動作する高精度マニピュレーター"
+            ),
+            default=False,
+            options={'SKIP_SAVE'},
+        )
+    )
+
+    bpy.types.WindowManager.maya_micro_manipulator_mode = (
+        bpy.props.EnumProperty(
+            name="Micro Manipulator Mode",
+            items=MICRO_MODE_ITEMS,
+            default='AUTO',
+            options={'SKIP_SAVE'},
+        )
+    )
+
+    bpy.types.WindowManager.maya_micro_visibility_owned = (
+        bpy.props.BoolProperty(
+            default=False,
+            options={'HIDDEN', 'SKIP_SAVE'},
+        )
+    )
+
+    bpy.types.WindowManager.maya_micro_previous_show_gizmo = (
+        bpy.props.BoolProperty(
+            default=True,
+            options={'HIDDEN', 'SKIP_SAVE'},
+        )
+    )
+
+    bpy.types.WindowManager.maya_micro_previous_show_gizmo_tool = (
+        bpy.props.BoolProperty(
+            default=True,
+            options={'HIDDEN', 'SKIP_SAVE'},
+        )
+    )
+
+    bpy.types.WindowManager.maya_micro_previous_show_gizmo_context = (
+        bpy.props.BoolProperty(
+            default=True,
+            options={'HIDDEN', 'SKIP_SAVE'},
+        )
+    )
+
+
+def _micro_average_vectors(vectors):
+    if not vectors:
+        return None
+
+    total = mathutils.Vector((0.0, 0.0, 0.0))
+
+    for vector in vectors:
+        total += vector
+
+    return total / len(vectors)
+
+
+def _micro_bounding_box_center(vectors):
+    if not vectors:
+        return None
+
+    min_value = vectors[0].copy()
+    max_value = vectors[0].copy()
+
+    for vector in vectors[1:]:
+        min_value.x = min(min_value.x, vector.x)
+        min_value.y = min(min_value.y, vector.y)
+        min_value.z = min(min_value.z, vector.z)
+
+        max_value.x = max(max_value.x, vector.x)
+        max_value.y = max(max_value.y, vector.y)
+        max_value.z = max(max_value.z, vector.z)
+
+    return (min_value + max_value) * 0.5
+
+
+def _micro_edit_mesh_active_position(context, obj, bm):
+    try:
+        active = bm.select_history.active
+    except Exception:
+        active = None
+
+    if active is None:
+        return None
+
+    local_position = None
+
+    if isinstance(active, bmesh.types.BMVert):
+        local_position = active.co.copy()
+
+    elif isinstance(active, bmesh.types.BMEdge):
+        local_position = (
+            active.verts[0].co +
+            active.verts[1].co
+        ) * 0.5
+
+    elif isinstance(active, bmesh.types.BMFace):
+        local_position = active.calc_center_median()
+
+    if local_position is None:
+        return None
+
+    try:
+        return obj.matrix_world @ local_position
+    except Exception:
+        return None
+
+
+def _micro_edit_mesh_positions(context, obj):
+    if obj is None or obj.type != 'MESH':
+        return [], None
+
+    try:
+        bm = bmesh.from_edit_mesh(obj.data)
+    except Exception:
+        return [], None
+
+    positions = []
+
+    try:
+        for vertex in bm.verts:
+            if vertex.select:
+                positions.append(
+                    obj.matrix_world @ vertex.co
+                )
+    except Exception:
+        positions = []
+
+    active_position = _micro_edit_mesh_active_position(
+        context,
+        obj,
+        bm,
+    )
+
+    return positions, active_position
+
+
+def _micro_pose_bone_world_matrix(context, pose_bone):
+    obj = getattr(context, "active_object", None)
+
+    if obj is None or pose_bone is None:
+        return None
+
+    try:
+        return obj.matrix_world @ pose_bone.matrix
+    except Exception:
+        return None
+
+
+def _micro_pose_positions(context):
+    positions = []
+
+    try:
+        selected_pose_bones = context.selected_pose_bones or []
+    except Exception:
+        selected_pose_bones = []
+
+    for pose_bone in selected_pose_bones:
+        matrix = _micro_pose_bone_world_matrix(
+            context,
+            pose_bone,
+        )
+
+        if matrix is not None:
+            positions.append(matrix.translation.copy())
+
+    active_position = None
+
+    try:
+        active_pose_bone = context.active_pose_bone
+    except Exception:
+        active_pose_bone = None
+
+    if active_pose_bone is not None:
+        matrix = _micro_pose_bone_world_matrix(
+            context,
+            active_pose_bone,
+        )
+
+        if matrix is not None:
+            active_position = matrix.translation.copy()
+
+    return positions, active_position
+
+
+def _micro_object_positions(context):
+    try:
+        selected_objects = list(context.selected_objects or [])
+    except Exception:
+        selected_objects = []
+
+    origin_positions = []
+    bounding_positions = []
+
+    for obj in selected_objects:
+        try:
+            origin_positions.append(
+                obj.matrix_world.translation.copy()
+            )
+        except Exception:
+            pass
+
+        try:
+            for corner in obj.bound_box:
+                bounding_positions.append(
+                    obj.matrix_world @ mathutils.Vector(corner)
+                )
+        except Exception:
+            pass
+
+    active_position = None
+    active_object = getattr(context, "active_object", None)
+
+    if active_object is not None:
+        try:
+            active_position = (
+                active_object.matrix_world.translation.copy()
+            )
+        except Exception:
+            pass
+
+    return (
+        origin_positions,
+        bounding_positions,
+        active_position,
+    )
+
+
+def get_micro_manipulator_pivot(context):
+    try:
+        pivot_mode = context.scene.tool_settings.transform_pivot_point
+    except Exception:
+        pivot_mode = 'MEDIAN_POINT'
+
+    if pivot_mode == 'CURSOR':
+        try:
+            return context.scene.cursor.location.copy()
+        except Exception:
+            return mathutils.Vector((0.0, 0.0, 0.0))
+
+    if context.mode == 'POSE':
+        positions, active_position = _micro_pose_positions(context)
+
+        if pivot_mode == 'ACTIVE_ELEMENT' and active_position is not None:
+            return active_position
+
+        if pivot_mode == 'BOUNDING_BOX_CENTER':
+            center = _micro_bounding_box_center(positions)
+        else:
+            center = _micro_average_vectors(positions)
+
+        if center is not None:
+            return center
+
+        if active_position is not None:
+            return active_position
+
+    if context.mode == 'EDIT_MESH':
+        obj = getattr(context, "active_object", None)
+
+        positions, active_position = _micro_edit_mesh_positions(
+            context,
+            obj,
+        )
+
+        if pivot_mode == 'ACTIVE_ELEMENT' and active_position is not None:
+            return active_position
+
+        if pivot_mode == 'BOUNDING_BOX_CENTER':
+            center = _micro_bounding_box_center(positions)
+        else:
+            center = _micro_average_vectors(positions)
+
+        if center is not None:
+            return center
+
+        if active_position is not None:
+            return active_position
+
+    (
+        origin_positions,
+        bounding_positions,
+        active_position,
+    ) = _micro_object_positions(context)
+
+    if pivot_mode == 'ACTIVE_ELEMENT' and active_position is not None:
+        return active_position
+
+    if pivot_mode == 'BOUNDING_BOX_CENTER':
+        center = _micro_bounding_box_center(
+            bounding_positions or origin_positions
+        )
+    else:
+        center = _micro_average_vectors(origin_positions)
+
+    if center is not None:
+        return center
+
+    if active_position is not None:
+        return active_position
+
+    active_object = getattr(context, "active_object", None)
+
+    if active_object is not None:
+        try:
+            return active_object.matrix_world.translation.copy()
+        except Exception:
+            pass
+
+    return mathutils.Vector((0.0, 0.0, 0.0))
+
+
+def _micro_active_transform_matrix(context):
+    if context.mode == 'POSE':
+        try:
+            active_pose_bone = context.active_pose_bone
+        except Exception:
+            active_pose_bone = None
+
+        matrix = _micro_pose_bone_world_matrix(
+            context,
+            active_pose_bone,
+        )
+
+        if matrix is not None:
+            return matrix
+
+    active_object = getattr(context, "active_object", None)
+
+    if active_object is not None:
+        try:
+            return active_object.matrix_world.copy()
+        except Exception:
+            pass
+
+    return mathutils.Matrix.Identity(4)
+
+
+def _micro_active_rotation_target(context):
+    if context.mode == 'POSE':
+        try:
+            if context.active_pose_bone is not None:
+                return context.active_pose_bone
+        except Exception:
+            pass
+
+    return getattr(context, "active_object", None)
+
+
+def _micro_matrix_axes(matrix):
+    try:
+        matrix_3x3 = matrix.to_3x3()
+    except Exception:
+        matrix_3x3 = mathutils.Matrix.Identity(3)
+
+    axes = []
+
+    for index in range(3):
+        try:
+            axis = matrix_3x3.col[index].copy()
+        except Exception:
+            axis = mathutils.Vector((0.0, 0.0, 0.0))
+            axis[index] = 1.0
+
+        if axis.length_squared < 1e-12:
+            axis = mathutils.Vector((0.0, 0.0, 0.0))
+            axis[index] = 1.0
+        else:
+            axis.normalize()
+
+        axes.append(axis)
+
+    return axes
+
+
+def _micro_gimbal_axes(context):
+    final_matrix = _micro_active_transform_matrix(context)
+    local_axes = _micro_matrix_axes(final_matrix)
+
+    target = _micro_active_rotation_target(context)
+
+    if target is None:
+        return local_axes
+
+    rotation_mode = getattr(target, "rotation_mode", 'XYZ')
+
+    if rotation_mode in {'QUATERNION', 'AXIS_ANGLE'}:
+        return local_axes
+
+    if rotation_mode not in {
+        'XYZ',
+        'XZY',
+        'YXZ',
+        'YZX',
+        'ZXY',
+        'ZYX',
+    }:
+        return local_axes
+
+    try:
+        euler = target.rotation_euler.copy()
+        base_quaternion = euler.to_quaternion()
+        final_quaternion = final_matrix.to_quaternion()
+
+        parent_quaternion = (
+            final_quaternion @ base_quaternion.inverted()
+        )
+    except Exception:
+        return local_axes
+
+    axes = []
+    epsilon = 1e-5
+
+    for index in range(3):
+        try:
+            perturbed = euler.copy()
+            perturbed[index] += epsilon
+
+            perturbed_quaternion = perturbed.to_quaternion()
+
+            delta = (
+                perturbed_quaternion @
+                base_quaternion.inverted()
+            )
+
+            axis = delta.axis.copy()
+
+            if axis.length_squared < 1e-12:
+                axis = mathutils.Vector((0.0, 0.0, 0.0))
+                axis[index] = 1.0
+
+            axis = parent_quaternion @ axis
+
+            if axis.length_squared < 1e-12:
+                axis = local_axes[index]
+            else:
+                axis.normalize()
+
+            axes.append(axis)
+
+        except Exception:
+            axes.append(local_axes[index])
+
+    return axes
+
+
+def get_micro_manipulator_axes(context, orientation):
+    if orientation == 'GLOBAL':
+        return (
+            mathutils.Vector((1.0, 0.0, 0.0)),
+            mathutils.Vector((0.0, 1.0, 0.0)),
+            mathutils.Vector((0.0, 0.0, 1.0)),
+        )
+
+    if orientation == 'GIMBAL':
+        return tuple(_micro_gimbal_axes(context))
+
+    matrix = _micro_active_transform_matrix(context)
+    return tuple(_micro_matrix_axes(matrix))
+
+
+def _micro_axis_matrix(origin, axis):
+    axis = axis.copy()
+
+    if axis.length_squared < 1e-12:
+        axis = mathutils.Vector((0.0, 0.0, 1.0))
+    else:
+        axis.normalize()
+
+    world_y = mathutils.Vector((0.0, 1.0, 0.0))
+
+    if abs(axis.dot(world_y)) > 0.999:
+        up_axis = 'X'
+    else:
+        up_axis = 'Y'
+
+    try:
+        quaternion = axis.to_track_quat('Z', up_axis)
+        matrix = quaternion.to_matrix().to_4x4()
+    except Exception:
+        matrix = mathutils.Matrix.Identity(4)
+
+    matrix.translation = origin
+    return matrix
+
+
+def _micro_active_tool_idname(context):
+    try:
+        tool = context.workspace.tools.from_space_view3d_mode(
+            context.mode,
+            create=False,
+        )
+
+        if tool is not None:
+            return tool.idname
+    except Exception:
+        pass
+
+    return ""
+
+
+def get_micro_manipulator_visible_mode(context):
+    wm = getattr(context, "window_manager", None)
+
+    try:
+        mode = wm.maya_micro_manipulator_mode
+    except Exception:
+        mode = 'AUTO'
+
+    if mode in {'MOVE', 'ROTATE', 'SCALE'}:
+        return mode
+
+    tool_idname = _micro_active_tool_idname(context)
+
+    if tool_idname == 'builtin.rotate':
+        return 'ROTATE'
+
+    if tool_idname == 'builtin.scale':
+        return 'SCALE'
+
+    return 'MOVE'
+
+
+def _safe_setattr(target, name, value):
+    try:
+        setattr(target, name, value)
+        return True
+    except Exception:
+        return False
+
+
+class VIEW3D_OT_maya_set_transform_orientation(bpy.types.Operator):
+    bl_idname = "view3d.maya_set_transform_orientation"
+    bl_label = "マニピュレーター方向を設定"
+    bl_options = {'REGISTER'}
+
+    orientation: bpy.props.EnumProperty(
+        name="Transform Orientation",
+        items=(
+            ('GLOBAL', "Global", "ワールド座標に合わせる"),
+            ('LOCAL', "Local", "アクティブ対象のローカル座標に合わせる"),
+            ('GIMBAL', "Gimbal", "Euler回転軸に合わせる"),
+        ),
+        default='GLOBAL',
+    )
+
+    def execute(self, context):
+        if not set_transform_orientation(
+            context,
+            self.orientation,
+        ):
+            self.report(
+                {'WARNING'},
+                "Transform Orientationを変更できませんでした。",
+            )
+            return {'CANCELLED'}
+
+        self.report(
+            {'INFO'},
+            f"Manipulator Orientation: {self.orientation}",
+        )
+        return {'FINISHED'}
+
+
+class VIEW3D_OT_maya_toggle_micro_manipulator(bpy.types.Operator):
+    bl_idname = "view3d.maya_toggle_micro_manipulator"
+    bl_label = "Micro Manipulator切替"
+    bl_options = {'REGISTER'}
+
+    enable: bpy.props.BoolProperty(
+        name="有効",
+        default=True,
+    )
+
+    def execute(self, context):
+        wm = context.window_manager
+
+        wm.maya_micro_manipulator_enabled = self.enable
+
+        apply_maya_micro_space_visibility(
+            context,
+            self.enable,
+        )
+
+        tag_all_view3d_redraw()
+
+        if self.enable:
+            self.report(
+                {'INFO'},
+                "Micro Manipulator: ON（約1/10感度）",
+            )
+        else:
+            self.report(
+                {'INFO'},
+                "Micro Manipulator: OFF",
+            )
+
+        return {'FINISHED'}
+
+
+class VIEW3D_OT_maya_set_micro_manipulator_mode(
+    bpy.types.Operator
+):
+    bl_idname = "view3d.maya_set_micro_manipulator_mode"
+    bl_label = "Micro Manipulatorモードを設定"
+    bl_options = {'REGISTER'}
+
+    mode: bpy.props.EnumProperty(
+        name="Mode",
+        items=MICRO_MODE_ITEMS,
+        default='AUTO',
+    )
+
+    def execute(self, context):
+        context.window_manager.maya_micro_manipulator_mode = self.mode
+
+        tag_all_view3d_redraw()
+
+        self.report(
+            {'INFO'},
+            f"Micro Manipulator Mode: {self.mode}",
+        )
+        return {'FINISHED'}
+
+
+class VIEW3D_MT_maya_manipulator_menu(bpy.types.Menu):
+    bl_idname = "VIEW3D_MT_maya_manipulator_menu"
+    bl_label = "Manipulator Settings"
+
+    def draw(self, context):
+        layout = self.layout
+
+        orientation = get_current_transform_orientation(context)
+        wm = context.window_manager
+
+        layout.label(
+            text="Manipulator Orientation",
+            icon='ORIENTATION_GLOBAL',
+        )
+
+        for orientation_id, label in (
+            ('GLOBAL', "Global"),
+            ('LOCAL', "Local"),
+            ('GIMBAL', "Gimbal"),
+        ):
+            icon = (
+                'RADIOBUT_ON'
+                if orientation == orientation_id
+                else 'RADIOBUT_OFF'
+            )
+
+            operator = layout.operator(
+                "view3d.maya_set_transform_orientation",
+                text=label,
+                icon=icon,
+            )
+            operator.orientation = orientation_id
+
+        layout.separator()
+
+        enabled = bool(
+            getattr(
+                wm,
+                "maya_micro_manipulator_enabled",
+                False,
+            )
+        )
+
+        toggle_operator = layout.operator(
+            "view3d.maya_toggle_micro_manipulator",
+            text=(
+                "Micro Manipulator: ON"
+                if enabled
+                else "Micro Manipulator: OFF"
+            ),
+            icon=(
+                'CHECKBOX_HLT'
+                if enabled
+                else 'CHECKBOX_DEHLT'
+            ),
+        )
+        toggle_operator.enable = not enabled
+
+        layout.label(
+            text="通常の約1/10の感度で操作",
+            icon='INFO',
+        )
+
+        layout.separator()
+
+        layout.label(
+            text="Micro Manipulator表示モード",
+            icon='GIZMO',
+        )
+
+        current_mode = getattr(
+            wm,
+            "maya_micro_manipulator_mode",
+            'AUTO',
+        )
+
+        for mode_id, label in (
+            ('AUTO', "W / E / R 連動"),
+            ('MOVE', "Move固定"),
+            ('ROTATE', "Rotate固定"),
+            ('SCALE', "Scale固定"),
+        ):
+            icon = (
+                'RADIOBUT_ON'
+                if current_mode == mode_id
+                else 'RADIOBUT_OFF'
+            )
+
+            operator = layout.operator(
+                "view3d.maya_set_micro_manipulator_mode",
+                text=label,
+                icon=icon,
+            )
+            operator.mode = mode_id
+
+
+class VIEW3D_GGT_maya_micro_manipulator(
+    bpy.types.GizmoGroup
+):
+    bl_idname = "VIEW3D_GGT_maya_micro_manipulator"
+    bl_label = "Maya Micro Manipulator"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'WINDOW'
+    bl_options = {'3D', 'PERSISTENT'}
+
+    _AXIS_COLORS = (
+        (0.95, 0.12, 0.12),
+        (0.20, 0.85, 0.20),
+        (0.18, 0.38, 1.00),
+    )
+
+    @classmethod
+    def poll(cls, context):
+        wm = getattr(context, "window_manager", None)
+
+        if wm is None:
+            return False
+
+        if not getattr(
+            wm,
+            "maya_micro_manipulator_enabled",
+            False,
+        ):
+            return False
+
+        active_object = getattr(context, "active_object", None)
+
+        if active_object is None:
+            return False
+
+        if context.mode == 'POSE':
+            try:
+                return bool(context.selected_pose_bones)
+            except Exception:
+                return False
+
+        if context.mode == 'EDIT_MESH':
+            return True
+
+        try:
+            return bool(context.selected_objects)
+        except Exception:
+            return active_object is not None
+
+    def setup(self, context):
+        self._gizmo_groups = {
+            'MOVE': [],
+            'ROTATE': [],
+            'SCALE': [],
+        }
+
+        for axis_index in range(3):
+            axis_constraint = [False, False, False]
+            axis_constraint[axis_index] = True
+            axis_constraint = tuple(axis_constraint)
+
+            color = self._AXIS_COLORS[axis_index]
+
+            # ------------------------------------------------
+            # Micro Move
+            # ------------------------------------------------
+
+            move_gizmo = self.gizmos.new(
+                "GIZMO_GT_arrow_3d"
+            )
+
+            move_properties = move_gizmo.target_set_operator(
+                "transform.translate"
+            )
+
+            _safe_setattr(
+                move_properties,
+                "constraint_axis",
+                axis_constraint,
+            )
+            _safe_setattr(
+                move_properties,
+                "orient_type",
+                'GLOBAL',
+            )
+            _safe_setattr(
+                move_properties,
+                "release_confirm",
+                True,
+            )
+            _safe_setattr(
+                move_properties,
+                "use_accurate",
+                True,
+            )
+
+            _safe_setattr(move_gizmo, "draw_style", 'CONE')
+            _safe_setattr(move_gizmo, "use_draw_modal", True)
+            _safe_setattr(move_gizmo, "use_draw_value", True)
+            _safe_setattr(move_gizmo, "line_width", 2.5)
+
+            move_gizmo.color = color
+            move_gizmo.alpha = 0.8
+            move_gizmo.color_highlight = (1.0, 1.0, 0.2)
+            move_gizmo.alpha_highlight = 1.0
+            move_gizmo.scale_basis = (
+                MICRO_MANIPULATOR_GIZMO_SCALE
+            )
+
+            self._gizmo_groups['MOVE'].append(
+                (
+                    move_gizmo,
+                    move_properties,
+                    axis_index,
+                )
+            )
+
+            # ------------------------------------------------
+            # Micro Rotate
+            # ------------------------------------------------
+
+            rotate_gizmo = self.gizmos.new(
+                "GIZMO_GT_dial_3d"
+            )
+
+            rotate_properties = rotate_gizmo.target_set_operator(
+                "transform.rotate"
+            )
+
+            _safe_setattr(
+                rotate_properties,
+                "constraint_axis",
+                axis_constraint,
+            )
+            _safe_setattr(
+                rotate_properties,
+                "orient_type",
+                'GLOBAL',
+            )
+            _safe_setattr(
+                rotate_properties,
+                "release_confirm",
+                True,
+            )
+            _safe_setattr(
+                rotate_properties,
+                "use_accurate",
+                True,
+            )
+
+            _safe_setattr(rotate_gizmo, "use_draw_modal", True)
+            _safe_setattr(rotate_gizmo, "use_draw_value", True)
+            _safe_setattr(rotate_gizmo, "line_width", 3.0)
+
+            rotate_gizmo.color = color
+            rotate_gizmo.alpha = 0.65
+            rotate_gizmo.color_highlight = (1.0, 1.0, 0.2)
+            rotate_gizmo.alpha_highlight = 1.0
+            rotate_gizmo.scale_basis = (
+                MICRO_MANIPULATOR_GIZMO_SCALE * 1.15
+            )
+
+            self._gizmo_groups['ROTATE'].append(
+                (
+                    rotate_gizmo,
+                    rotate_properties,
+                    axis_index,
+                )
+            )
+
+            # ------------------------------------------------
+            # Micro Scale
+            # ------------------------------------------------
+
+            scale_gizmo = self.gizmos.new(
+                "GIZMO_GT_arrow_3d"
+            )
+
+            scale_properties = scale_gizmo.target_set_operator(
+                "transform.resize"
+            )
+
+            _safe_setattr(
+                scale_properties,
+                "constraint_axis",
+                axis_constraint,
+            )
+            _safe_setattr(
+                scale_properties,
+                "orient_type",
+                'GLOBAL',
+            )
+            _safe_setattr(
+                scale_properties,
+                "release_confirm",
+                True,
+            )
+            _safe_setattr(
+                scale_properties,
+                "use_accurate",
+                True,
+            )
+
+            _safe_setattr(scale_gizmo, "draw_style", 'BOX')
+            _safe_setattr(scale_gizmo, "use_draw_modal", True)
+            _safe_setattr(scale_gizmo, "use_draw_value", True)
+            _safe_setattr(scale_gizmo, "line_width", 2.5)
+
+            scale_gizmo.color = color
+            scale_gizmo.alpha = 0.8
+            scale_gizmo.color_highlight = (1.0, 1.0, 0.2)
+            scale_gizmo.alpha_highlight = 1.0
+            scale_gizmo.scale_basis = (
+                MICRO_MANIPULATOR_GIZMO_SCALE
+            )
+
+            self._gizmo_groups['SCALE'].append(
+                (
+                    scale_gizmo,
+                    scale_properties,
+                    axis_index,
+                )
+            )
+
+        self._update_gizmos(context)
+
+    def refresh(self, context):
+        self._update_gizmos(context)
+
+    def draw_prepare(self, context):
+        self._update_gizmos(context)
+
+    def _update_gizmos(self, context):
+        apply_maya_micro_space_visibility(
+            context,
+            True,
+        )
+
+        orientation = get_current_transform_orientation(
+            context
+        )
+
+        visible_mode = get_micro_manipulator_visible_mode(
+            context
+        )
+
+        origin = get_micro_manipulator_pivot(context)
+
+        axes = get_micro_manipulator_axes(
+            context,
+            orientation,
+        )
+
+        for mode_name, gizmo_items in self._gizmo_groups.items():
+            is_visible = (mode_name == visible_mode)
+
+            for gizmo, operator_properties, axis_index in gizmo_items:
+                try:
+                    gizmo.hide = not is_visible
+                except Exception:
+                    pass
+
+                if not is_visible:
+                    continue
+
+                _safe_setattr(
+                    operator_properties,
+                    "orient_type",
+                    orientation,
+                )
+                _safe_setattr(
+                    operator_properties,
+                    "use_accurate",
+                    True,
+                )
+                _safe_setattr(
+                    operator_properties,
+                    "release_confirm",
+                    True,
+                )
+
+                try:
+                    gizmo.matrix_basis = _micro_axis_matrix(
+                        origin,
+                        axes[axis_index],
+                    )
+                except Exception:
+                    pass
+
+
+# ============================================================
+# Mayaスペースキー
 # ============================================================
 
 class VIEW3D_MT_maya_hotbox_pie(bpy.types.Menu):
-    """Maya Hotboxの代用パイメニュー。"""
-
     bl_idname = "VIEW3D_MT_maya_hotbox_pie"
     bl_label = "Hotbox (Maya風)"
 
@@ -1160,7 +2295,6 @@ class VIEW3D_MT_maya_hotbox_pie(bpy.types.Menu):
         pie = self.layout.menu_pie()
         is_pose = (context.mode == 'POSE')
 
-        # --- 西（左）: キー挿入 ---
         if hasattr(bpy.types, "ANIM_OT_keyframe_insert_menu"):
             pie.operator(
                 "anim.keyframe_insert_menu",
@@ -1174,42 +2308,36 @@ class VIEW3D_MT_maya_hotbox_pie(bpy.types.Menu):
                 icon='KEY_HLT',
             )
 
-        # --- 東（右）: キー削除 ---
         pie.operator(
             "anim.keyframe_delete_v3d",
             text="キー削除",
             icon='KEY_DEHLT',
         )
 
-        # --- 南（下）: すべてのツール一覧 ---
         pie.operator(
             "wm.toolbar",
             text="すべてのツール",
             icon='TOOL_SETTINGS',
         )
 
-        # --- 北（上）: 再生/停止 ---
         pie.operator(
             "screen.animation_play",
             text="再生 / 停止",
             icon='PLAY',
         )
 
-        # --- 北西: オブジェクト作成（Maya風スポーン） ---
         pie.menu(
             "VIEW3D_MT_maya_spawn_menu",
             text="オブジェクト作成",
             icon='ADD',
         )
 
-        # --- 北東: コンストレイント ---
         pie.menu(
             "VIEW3D_MT_maya_constraint_menu",
             text="コンストレイント",
             icon='CONSTRAINT',
         )
 
-        # --- 南西: ポーズリセット or Object/Pose切替 ---
         if is_pose:
             pie.operator(
                 "pose.transforms_clear",
@@ -1223,14 +2351,12 @@ class VIEW3D_MT_maya_hotbox_pie(bpy.types.Menu):
                 icon='POSE_HLT',
             )
 
-        # --- 南東: 選択対象へフォーカス ---
         pie.operator(
             "view3d.view_selected",
             text="選択にフォーカス",
             icon='ZOOM_SELECTED',
         )
 
-        # --- 中央（マウスカーソル直下の枠）: ビュー切替 ---
         center = pie.column()
 
         gap = center.column()
@@ -1239,6 +2365,7 @@ class VIEW3D_MT_maya_hotbox_pie(bpy.types.Menu):
 
         box = center.box().column()
         box.scale_y = 1.2
+
         box.menu(
             "VIEW3D_MT_maya_view_menu",
             text="ビュー切替",
@@ -1247,13 +2374,6 @@ class VIEW3D_MT_maya_hotbox_pie(bpy.types.Menu):
 
 
 class VIEW3D_OT_maya_space(bpy.types.Operator):
-    """
-    Mayaのスペースキーを再現するモーダルオペレーター。
-
-    単押し: マウス下のビューポートを 1画面 / 4分割 でトグル。
-    長押し: Hotbox風パイメニューを表示。
-    """
-
     bl_idname = "view3d.maya_space"
     bl_label = "Maya Space (Tap: Quad View / Hold: Hotbox)"
     bl_options = {'REGISTER'}
@@ -1272,27 +2392,32 @@ class VIEW3D_OT_maya_space(bpy.types.Operator):
         self._mouse_x = getattr(event, "mouse_x", 0)
         self._mouse_y = getattr(event, "mouse_y", 0)
 
-        area, region, space, region_data = find_view3d_area_region_under_mouse(
-            context,
-            self._mouse_x,
-            self._mouse_y,
+        area, region, space, region_data = (
+            find_view3d_area_region_under_mouse(
+                context,
+                self._mouse_x,
+                self._mouse_y,
+            )
         )
 
         if area is None or region is None:
             return {'PASS_THROUGH'}
 
         wm = context.window_manager
+
         self._timer = wm.event_timer_add(
             0.02,
             window=context.window,
         )
-        wm.modal_handler_add(self)
 
+        wm.modal_handler_add(self)
         return {'RUNNING_MODAL'}
 
     def _remove_timer(self, context):
         if self._timer is not None:
-            context.window_manager.event_timer_remove(self._timer)
+            context.window_manager.event_timer_remove(
+                self._timer
+            )
             self._timer = None
 
     def _update_mouse_from_event(self, event):
@@ -1300,11 +2425,8 @@ class VIEW3D_OT_maya_space(bpy.types.Operator):
             return
 
         try:
-            mouse_x = event.mouse_x
-            mouse_y = event.mouse_y
-
-            self._mouse_x = mouse_x
-            self._mouse_y = mouse_y
+            self._mouse_x = event.mouse_x
+            self._mouse_y = event.mouse_y
         except Exception:
             pass
 
@@ -1341,10 +2463,12 @@ class VIEW3D_OT_maya_space(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
     def _open_hotbox(self, context):
-        area, region, space, region_data = find_view3d_area_region_under_mouse(
-            context,
-            self._mouse_x,
-            self._mouse_y,
+        area, region, space, region_data = (
+            find_view3d_area_region_under_mouse(
+                context,
+                self._mouse_x,
+                self._mouse_y,
+            )
         )
 
         try:
@@ -1363,10 +2487,12 @@ class VIEW3D_OT_maya_space(bpy.types.Operator):
             )
 
     def _toggle_quad_view(self, context):
-        area, region, space, region_data = find_view3d_area_region_under_mouse(
-            context,
-            self._mouse_x,
-            self._mouse_y,
+        area, region, space, region_data = (
+            find_view3d_area_region_under_mouse(
+                context,
+                self._mouse_x,
+                self._mouse_y,
+            )
         )
 
         try:
@@ -1380,7 +2506,7 @@ class VIEW3D_OT_maya_space(bpy.types.Operator):
                 try:
                     main_region_data = space.region_3d
                 except Exception:
-                    main_region_data = None
+                    pass
 
                 copy_region_view3d_state(
                     region_data,
@@ -1412,40 +2538,30 @@ class VIEW3D_OT_maya_space(bpy.types.Operator):
 
 
 # ============================================================
-# Alt+1 = コントローラー表示切替（Maya風）
+# Alt+1 = コントローラー表示切替
 # ============================================================
 
 class VIEW3D_OT_maya_toggle_controllers(bpy.types.Operator):
-    """
-    ビューポートのボーン（＝リグコントローラー）表示をトグルする。
-
-    ポイント:
-    - ビューポート単位で切り替わる（Mayaのパネル単位と同じ感覚）。
-    - オブジェクト自体を隠すわけではないので、
-      再生中でもアニメーションはそのまま動き続ける。
-    - マウス下のビューポートを優先。3D View以外の上で押した場合は
-      画面内で最大の3D Viewに対して効く（グローバル対応）。
-    """
-
     bl_idname = "view3d.maya_toggle_controllers"
     bl_label = "コントローラー表示切替 (Maya Alt+1)"
     bl_options = {'REGISTER'}
 
     def _find_space(self, context, event=None):
-        """対象のSpaceView3Dを探す。マウス下を優先する。"""
-
         space = None
 
         if event is not None:
             mouse_x = getattr(event, "mouse_x", None)
             mouse_y = getattr(event, "mouse_y", None)
 
-            _area, _region, space, _region_data = (
-                find_view3d_area_region_under_mouse(
-                    context,
-                    mouse_x,
-                    mouse_y,
-                )
+            (
+                _area,
+                _region,
+                space,
+                _region_data,
+            ) = find_view3d_area_region_under_mouse(
+                context,
+                mouse_x,
+                mouse_y,
             )
 
         if space is None or getattr(space, "type", None) != 'VIEW_3D':
@@ -1492,39 +2608,43 @@ class VIEW3D_OT_maya_toggle_controllers(bpy.types.Operator):
 
         try:
             for area in context.window.screen.areas:
-                if area.type == 'VIEW_3D' and area.spaces.active == space:
+                if (
+                    area.type == 'VIEW_3D' and
+                    area.spaces.active == space
+                ):
                     area.tag_redraw()
         except Exception:
             pass
 
-        if show:
-            self.report({'INFO'}, "コントローラー: 表示")
-        else:
-            self.report({'INFO'}, "コントローラー: 非表示")
+        self.report(
+            {'INFO'},
+            (
+                "コントローラー: 表示"
+                if show
+                else "コントローラー: 非表示"
+            ),
+        )
 
         return {'FINISHED'}
 
     def invoke(self, context, event):
-        space = self._find_space(context, event)
-        return self._toggle(context, space)
+        return self._toggle(
+            context,
+            self._find_space(context, event),
+        )
 
     def execute(self, context):
-        space = self._find_space(context)
-        return self._toggle(context, space)
+        return self._toggle(
+            context,
+            self._find_space(context),
+        )
 
 
 # ============================================================
-# Alt+W / Alt+S = キーフレームジャンプ（どこでも有効）
+# Alt+W / Alt+S = キーフレームジャンプ
 # ============================================================
 
 class SCREEN_OT_maya_keyframe_jump(bpy.types.Operator):
-    """
-    選択オブジェクトのキーフレーム間をジャンプする。
-
-    選択中オブジェクトのアクションから直接キーフレームを
-    収集するため、カーソルがどのエディター上にあっても動作する。
-    """
-
     bl_idname = "screen.maya_keyframe_jump"
     bl_label = "キーフレームジャンプ (Maya Alt+W/S)"
     bl_options = {'REGISTER'}
@@ -1536,8 +2656,6 @@ class SCREEN_OT_maya_keyframe_jump(bpy.types.Operator):
 
     @staticmethod
     def _collect_from_id(id_data, frames):
-        """1つのIDデータブロックからキーフレーム時刻を収集する。"""
-
         anim = getattr(id_data, "animation_data", None)
 
         if anim is None:
@@ -1556,8 +2674,6 @@ class SCREEN_OT_maya_keyframe_jump(bpy.types.Operator):
             pass
 
     def _collect_keyframes(self, context):
-        """選択オブジェクト群からすべてのキーフレーム時刻を集める。"""
-
         frames = set()
         objects = set()
 
@@ -1583,7 +2699,10 @@ class SCREEN_OT_maya_keyframe_jump(bpy.types.Operator):
                 shape_keys = getattr(data, "shape_keys", None)
 
                 if shape_keys is not None:
-                    self._collect_from_id(shape_keys, frames)
+                    self._collect_from_id(
+                        shape_keys,
+                        frames,
+                    )
 
         return frames
 
@@ -1593,7 +2712,9 @@ class SCREEN_OT_maya_keyframe_jump(bpy.types.Operator):
 
         if not frames:
             try:
-                return bpy.ops.screen.keyframe_jump(next=self.next)
+                return bpy.ops.screen.keyframe_jump(
+                    next=self.next
+                )
             except Exception:
                 self.report(
                     {'INFO'},
@@ -1609,10 +2730,18 @@ class SCREEN_OT_maya_keyframe_jump(bpy.types.Operator):
         epsilon = 1e-4
 
         if self.next:
-            candidates = [f for f in frames if f > current + epsilon]
+            candidates = [
+                frame
+                for frame in frames
+                if frame > current + epsilon
+            ]
             target = min(candidates) if candidates else None
         else:
-            candidates = [f for f in frames if f < current - epsilon]
+            candidates = [
+                frame
+                for frame in frames
+                if frame < current - epsilon
+            ]
             target = max(candidates) if candidates else None
 
         if target is None:
@@ -1634,30 +2763,16 @@ class SCREEN_OT_maya_keyframe_jump(bpy.types.Operator):
 
 
 # ============================================================
-# Alt+* = トランスフォームを初期化（Maya風 / Auto Keying連動）
+# Alt+* = トランスフォーム初期化
 # ============================================================
 
 class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
-    """
-    選択対象の移動 / 回転 / スケールをデフォルト値に戻す。
-
-    「すべて0にする」のではなく初期状態へ戻す:
-        移動:     (0, 0, 0)
-        回転:     単位回転（角度0）
-        スケール: (1, 1, 1)
-
-    Object Mode: 選択オブジェクトすべてが対象。
-    Pose Mode:   選択ポーズボーンすべてが対象。
-    """
-
     bl_idname = "object.maya_reset_transforms"
     bl_label = "トランスフォームを初期化 (Maya Alt+*)"
     bl_options = {'REGISTER', 'UNDO'}
 
     @staticmethod
     def _reset_transform_channels(target, include_delta=False):
-        """オブジェクト / ポーズボーン共通の初期化処理。"""
-
         try:
             target.location = (0.0, 0.0, 0.0)
         except Exception:
@@ -1669,12 +2784,22 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
             pass
 
         try:
-            target.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+            target.rotation_quaternion = (
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+            )
         except Exception:
             pass
 
         try:
-            target.rotation_axis_angle = (0.0, 0.0, 1.0, 0.0)
+            target.rotation_axis_angle = (
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+            )
         except Exception:
             pass
 
@@ -1690,7 +2815,11 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
                 pass
 
             try:
-                target.delta_rotation_euler = (0.0, 0.0, 0.0)
+                target.delta_rotation_euler = (
+                    0.0,
+                    0.0,
+                    0.0,
+                )
             except Exception:
                 pass
 
@@ -1711,8 +2840,6 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
 
     @staticmethod
     def _autokey_enabled(context):
-        """Auto Keying（自動キー挿入）がONかどうか。"""
-
         try:
             return bool(
                 context.scene.tool_settings.use_keyframe_insert_auto
@@ -1722,8 +2849,6 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
 
     @staticmethod
     def _rotation_data_path(target):
-        """ターゲットの回転モードに対応するデータパスを返す。"""
-
         mode = getattr(target, "rotation_mode", 'XYZ')
 
         if mode == 'QUATERNION':
@@ -1735,9 +2860,12 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
         return "rotation_euler"
 
     @classmethod
-    def _insert_reset_keys(cls, context, target, include_delta=False):
-        """リセット後の値に対してキーフレームを挿入する。"""
-
+    def _insert_reset_keys(
+        cls,
+        context,
+        target,
+        include_delta=False,
+    ):
         try:
             frame = context.scene.frame_current
         except Exception:
@@ -1764,10 +2892,18 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
         if include_delta:
             data_paths.append("delta_location")
 
-            if getattr(target, "rotation_mode", 'XYZ') == 'QUATERNION':
-                data_paths.append("delta_rotation_quaternion")
+            if getattr(
+                target,
+                "rotation_mode",
+                'XYZ',
+            ) == 'QUATERNION':
+                data_paths.append(
+                    "delta_rotation_quaternion"
+                )
             else:
-                data_paths.append("delta_rotation_euler")
+                data_paths.append(
+                    "delta_rotation_euler"
+                )
 
             data_paths.append("delta_scale")
 
@@ -1791,6 +2927,7 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
 
                 if ok:
                     inserted += 1
+
             except TypeError:
                 try:
                     if frame is not None:
@@ -1805,6 +2942,7 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
                         inserted += 1
                 except Exception:
                     pass
+
             except Exception:
                 pass
 
@@ -1823,7 +2961,10 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
                 reset_count += 1
 
                 if autokey:
-                    if self._insert_reset_keys(context, pose_bone):
+                    if self._insert_reset_keys(
+                        context,
+                        pose_bone,
+                    ):
                         keyed_count += 1
 
             if reset_count == 0:
@@ -1902,20 +3043,10 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
 
 
 # ============================================================
-# グラフエディター: Shift+中ドラッグ = 軸ロックキー移動
+# グラフエディター: Shift+中ドラッグ
 # ============================================================
 
 class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
-    """
-    選択中のキーフレームを軸ロック付きで移動する。
-
-    Mayaの Shift+中ドラッグ を再現:
-        最初に左右へ動かす → フレーム（時間）のみ移動
-        最初に上下へ動かす → 値のみ移動
-
-    左クリック／左ドラッグの標準操作には干渉しない。
-    """
-
     bl_idname = "graph.maya_slide_keys"
     bl_label = "キーを軸ロック移動 (Maya Shift+MMB)"
     bl_options = {'REGISTER', 'UNDO', 'BLOCKING'}
@@ -1931,10 +3062,6 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
 
     @staticmethod
     def _collect_editable_fcurves(context):
-        """編集可能なFカーブを集める。"""
-
-        fcurves = []
-
         try:
             fcurves = list(context.editable_fcurves or [])
         except Exception:
@@ -1946,18 +3073,14 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
             except Exception:
                 fcurves = []
 
-        result = []
-
-        for fcurve in fcurves:
-            if getattr(fcurve, "lock", False):
-                continue
-
-            if getattr(fcurve, "hide", False):
-                continue
-
-            result.append(fcurve)
-
-        return result
+        return [
+            fcurve
+            for fcurve in fcurves
+            if (
+                not getattr(fcurve, "lock", False) and
+                not getattr(fcurve, "hide", False)
+            )
+        ]
 
     def invoke(self, context, event):
         region = context.region
@@ -2002,6 +3125,7 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
             )
 
         self._axis = None
+
         self._start_region = (
             event.mouse_region_x,
             event.mouse_region_y,
@@ -2016,16 +3140,22 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
             return {'PASS_THROUGH'}
 
         context.window_manager.modal_handler_add(self)
-        self._set_header(context, 0.0, 0.0)
 
+        self._set_header(context, 0.0, 0.0)
         return {'RUNNING_MODAL'}
 
     def modal(self, context, event):
-        if event.type in {'MOUSEMOVE', 'INBETWEEN_MOUSEMOVE'}:
+        if event.type in {
+            'MOUSEMOVE',
+            'INBETWEEN_MOUSEMOVE',
+        }:
             self._update(context, event)
             return {'RUNNING_MODAL'}
 
-        if event.type == 'MIDDLEMOUSE' and event.value == 'RELEASE':
+        if (
+            event.type == 'MIDDLEMOUSE' and
+            event.value == 'RELEASE'
+        ):
             self._finish(context)
             return {'FINISHED'}
 
@@ -2058,13 +3188,17 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
             ) < SLIDE_AXIS_LOCK_THRESHOLD_PX:
                 return
 
-            if abs(pixel_dx) >= abs(pixel_dy):
-                self._axis = 'FRAME'
-            else:
-                self._axis = 'VALUE'
+            self._axis = (
+                'FRAME'
+                if abs(pixel_dx) >= abs(pixel_dy)
+                else 'VALUE'
+            )
 
         try:
-            view = region.view2d.region_to_view(mouse_x, mouse_y)
+            view = region.view2d.region_to_view(
+                mouse_x,
+                mouse_y,
+            )
         except Exception:
             return
 
@@ -2079,12 +3213,19 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
         else:
             delta_frame = 0.0
 
-        self._apply_delta(context, delta_frame, delta_value)
-        self._set_header(context, delta_frame, delta_value)
+        self._apply_delta(
+            context,
+            delta_frame,
+            delta_value,
+        )
+
+        self._set_header(
+            context,
+            delta_frame,
+            delta_value,
+        )
 
     def _apply_delta(self, context, delta_frame, delta_value):
-        """保存済みの元座標 + デルタを全対象キーに適用する。"""
-
         for fcurve, originals in self._targets:
             try:
                 selected = [
@@ -2098,16 +3239,21 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
             if len(selected) != len(originals):
                 continue
 
-            for keyframe_point, (co, hl, hr) in zip(selected, originals):
+            for keyframe_point, (co, hl, hr) in zip(
+                selected,
+                originals,
+            ):
                 try:
                     keyframe_point.co = (
                         co[0] + delta_frame,
                         co[1] + delta_value,
                     )
+
                     keyframe_point.handle_left = (
                         hl[0] + delta_frame,
                         hl[1] + delta_value,
                     )
+
                     keyframe_point.handle_right = (
                         hr[0] + delta_frame,
                         hr[1] + delta_value,
@@ -2136,7 +3282,8 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
 
             context.area.header_text_set(
                 f"キー移動 [{axis_label}]  "
-                f"Frame {delta_frame:+.1f} / Value {delta_value:+.3f}  "
+                f"Frame {delta_frame:+.1f} / "
+                f"Value {delta_value:+.3f}  "
                 "(MMB離す: 確定 / ESC: キャンセル / "
                 "Ctrl: スナップ解除)"
             )
@@ -2156,12 +3303,10 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
 
 
 # ============================================================
-# ビュー切替（Maya風・Hotbox中央の枠から呼び出す）
+# ビュー切替
 # ============================================================
 
 class VIEW3D_OT_maya_set_view(bpy.types.Operator):
-    """ビューを切り替える（Maya風）。"""
-
     bl_idname = "view3d.maya_set_view"
     bl_label = "ビュー切替 (Maya)"
     bl_options = {'REGISTER'}
@@ -2198,14 +3343,22 @@ class VIEW3D_OT_maya_set_view(bpy.types.Operator):
             return {'FINISHED'}
 
         if view_type == 'CAMERA_NEW':
-            return self._create_camera_from_view(context, rv3d)
+            return self._create_camera_from_view(
+                context,
+                rv3d,
+            )
 
         if view_type in self._ORTHO_ROTATIONS:
             try:
-                result = bpy.ops.view3d.view_axis(type=view_type)
+                result = bpy.ops.view3d.view_axis(
+                    type=view_type
+                )
 
                 if 'FINISHED' in result:
-                    self.report({'INFO'}, f"ビュー: {view_type}")
+                    self.report(
+                        {'INFO'},
+                        f"ビュー: {view_type}",
+                    )
                     return {'FINISHED'}
             except Exception:
                 pass
@@ -2216,7 +3369,11 @@ class VIEW3D_OT_maya_set_view(bpy.types.Operator):
                     rv3d.view_rotation = mathutils.Quaternion(
                         self._ORTHO_ROTATIONS[view_type]
                     )
-                    self.report({'INFO'}, f"ビュー: {view_type}")
+
+                    self.report(
+                        {'INFO'},
+                        f"ビュー: {view_type}",
+                    )
                     return {'FINISHED'}
                 except Exception:
                     pass
@@ -2230,14 +3387,18 @@ class VIEW3D_OT_maya_set_view(bpy.types.Operator):
         return {'CANCELLED'}
 
     def _create_camera_from_view(self, context, rv3d):
-        """現在の視点にカメラを作成し、そのカメラ視点へ入る。"""
-
         scene = context.scene
 
         cam_data = bpy.data.cameras.new("MayaCamera")
-        cam_obj = bpy.data.objects.new("MayaCamera", cam_data)
+        cam_obj = bpy.data.objects.new(
+            "MayaCamera",
+            cam_data,
+        )
 
-        collection = getattr(context, "collection", None) or scene.collection
+        collection = (
+            getattr(context, "collection", None) or
+            scene.collection
+        )
 
         try:
             collection.objects.link(cam_obj)
@@ -2253,7 +3414,9 @@ class VIEW3D_OT_maya_set_view(bpy.types.Operator):
 
         if rv3d is not None:
             try:
-                cam_obj.matrix_world = rv3d.view_matrix.inverted()
+                cam_obj.matrix_world = (
+                    rv3d.view_matrix.inverted()
+                )
             except Exception:
                 pass
 
@@ -2270,14 +3433,15 @@ class VIEW3D_OT_maya_set_view(bpy.types.Operator):
 
         self.report(
             {'INFO'},
-            f"新規カメラ '{cam_obj.name}' を作成し、その視点に入りました。",
+            f"新規カメラ '{cam_obj.name}' を作成し、"
+            "その視点に入りました。",
         )
         return {'FINISHED'}
 
 
-class VIEW3D_OT_maya_look_through_camera(bpy.types.Operator):
-    """指定した名前のカメラの視点に切り替える。"""
-
+class VIEW3D_OT_maya_look_through_camera(
+    bpy.types.Operator
+):
     bl_idname = "view3d.maya_look_through_camera"
     bl_label = "カメラ視点へ切替 (Maya)"
     bl_options = {'REGISTER', 'UNDO'}
@@ -2294,13 +3458,15 @@ class VIEW3D_OT_maya_look_through_camera(bpy.types.Operator):
         try:
             cam_obj = scene.objects.get(self.camera_name)
         except Exception:
-            cam_obj = None
+            pass
 
         if cam_obj is None:
             try:
-                cam_obj = bpy.data.objects.get(self.camera_name)
+                cam_obj = bpy.data.objects.get(
+                    self.camera_name
+                )
             except Exception:
-                cam_obj = None
+                pass
 
         if cam_obj is None or cam_obj.type != 'CAMERA':
             self.report(
@@ -2328,15 +3494,11 @@ class VIEW3D_OT_maya_look_through_camera(bpy.types.Operator):
         else:
             self.report(
                 {'WARNING'},
-                "3D Viewが見つからないため、シーンカメラのみ変更しました。",
+                "3D Viewが見つからないため、"
+                "シーンカメラのみ変更しました。",
             )
 
-        try:
-            for area in context.window.screen.areas:
-                if area.type == 'VIEW_3D':
-                    area.tag_redraw()
-        except Exception:
-            pass
+        tag_all_view3d_redraw()
 
         self.report(
             {'INFO'},
@@ -2346,8 +3508,6 @@ class VIEW3D_OT_maya_look_through_camera(bpy.types.Operator):
 
 
 class VIEW3D_MT_maya_view_menu(bpy.types.Menu):
-    """Hotbox中央の枠から開くビュー切替メニュー。"""
-
     bl_idname = "VIEW3D_MT_maya_view_menu"
     bl_label = "ビュー切替"
 
@@ -2395,11 +3555,10 @@ class VIEW3D_MT_maya_view_menu(bpy.types.Menu):
             text="Bottom",
         ).view_type = 'BOTTOM'
 
-        cameras = []
-
         try:
             cameras = [
-                obj for obj in context.scene.objects
+                obj
+                for obj in context.scene.objects
                 if obj.type == 'CAMERA'
             ]
         except Exception:
@@ -2407,20 +3566,25 @@ class VIEW3D_MT_maya_view_menu(bpy.types.Menu):
 
         if cameras:
             layout.separator()
+
             layout.label(
                 text="シーンのカメラ:",
                 icon='CAMERA_DATA',
             )
 
-            active_camera = getattr(context.scene, "camera", None)
+            active_camera = getattr(
+                context.scene,
+                "camera",
+                None,
+            )
 
             for cam_obj in sorted(
                 cameras,
-                key=lambda o: o.name.lower(),
+                key=lambda item: item.name.lower(),
             ):
                 is_active = (cam_obj == active_camera)
 
-                op = layout.operator(
+                operator = layout.operator(
                     "view3d.maya_look_through_camera",
                     text=cam_obj.name,
                     icon=(
@@ -2429,7 +3593,7 @@ class VIEW3D_MT_maya_view_menu(bpy.types.Menu):
                         else 'OUTLINER_OB_CAMERA'
                     ),
                 )
-                op.camera_name = cam_obj.name
+                operator.camera_name = cam_obj.name
 
         layout.separator()
 
@@ -2441,12 +3605,10 @@ class VIEW3D_MT_maya_view_menu(bpy.types.Menu):
 
 
 # ============================================================
-# オブジェクト作成メニュー（Maya風スポーン）
+# オブジェクト作成メニュー
 # ============================================================
 
 class VIEW3D_MT_maya_spawn_menu(bpy.types.Menu):
-    """3Dカーソル位置にオブジェクトを作成するメニュー。"""
-
     bl_idname = "VIEW3D_MT_maya_spawn_menu"
     bl_label = "オブジェクト作成"
 
@@ -2458,36 +3620,43 @@ class VIEW3D_MT_maya_spawn_menu(bpy.types.Menu):
             text="Plane",
             icon='MESH_PLANE',
         )
+
         layout.operator(
             "mesh.primitive_cube_add",
             text="Cube",
             icon='MESH_CUBE',
         )
+
         layout.operator(
             "mesh.primitive_circle_add",
             text="Circle",
             icon='MESH_CIRCLE',
         )
+
         layout.operator(
             "mesh.primitive_uv_sphere_add",
             text="UV Sphere",
             icon='MESH_UVSPHERE',
         )
+
         layout.operator(
             "mesh.primitive_ico_sphere_add",
             text="Ico Sphere",
             icon='MESH_ICOSPHERE',
         )
+
         layout.operator(
             "mesh.primitive_cylinder_add",
             text="Cylinder",
             icon='MESH_CYLINDER',
         )
+
         layout.operator(
             "mesh.primitive_cone_add",
             text="Cone",
             icon='MESH_CONE',
         )
+
         layout.operator(
             "mesh.primitive_torus_add",
             text="Torus",
@@ -2501,21 +3670,25 @@ class VIEW3D_MT_maya_spawn_menu(bpy.types.Menu):
             text="Empty",
             icon='EMPTY_DATA',
         )
+
         layout.operator(
             "object.armature_add",
             text="Armature",
             icon='OUTLINER_OB_ARMATURE',
         )
+
         layout.operator(
             "object.camera_add",
             text="Camera",
             icon='OUTLINER_OB_CAMERA',
         )
+
         layout.operator(
             "object.light_add",
             text="Light",
             icon='OUTLINER_OB_LIGHT',
         )
+
         layout.operator(
             "object.text_add",
             text="Text",
@@ -2524,17 +3697,17 @@ class VIEW3D_MT_maya_spawn_menu(bpy.types.Menu):
 
 
 # ============================================================
-# コンストレイント（Maya風）
+# コンストレイント
 # ============================================================
 
 class OBJECT_OT_maya_add_constraint(bpy.types.Operator):
-    """Maya流にコンストレイントを追加する。"""
-
     bl_idname = "object.maya_add_constraint"
     bl_label = "コンストレイント追加 (Maya)"
     bl_options = {'REGISTER', 'UNDO'}
 
-    constraint_type: bpy.props.StringProperty(default='COPY_LOCATION')
+    constraint_type: bpy.props.StringProperty(
+        default='COPY_LOCATION'
+    )
 
     def execute(self, context):
         active = context.active_object
@@ -2547,12 +3720,15 @@ class OBJECT_OT_maya_add_constraint(bpy.types.Operator):
             return {'CANCELLED'}
 
         targets = [
-            obj for obj in (context.selected_objects or [])
+            obj
+            for obj in (context.selected_objects or [])
             if obj != active
         ]
 
         try:
-            constraint = active.constraints.new(type=self.constraint_type)
+            constraint = active.constraints.new(
+                type=self.constraint_type
+            )
         except Exception as error:
             self.report(
                 {'WARNING'},
@@ -2584,8 +3760,6 @@ class OBJECT_OT_maya_add_constraint(bpy.types.Operator):
 
 
 class VIEW3D_MT_maya_constraint_menu(bpy.types.Menu):
-    """Maya風コンストレイントメニュー。"""
-
     bl_idname = "VIEW3D_MT_maya_constraint_menu"
     bl_label = "コンストレイント"
 
@@ -2637,7 +3811,17 @@ class VIEW3D_MT_maya_constraint_menu(bpy.types.Menu):
         )
 
 
+# ============================================================
+# クラス登録
+# ============================================================
+
 MAYA_SPACE_CLASSES = (
+    VIEW3D_OT_maya_set_transform_orientation,
+    VIEW3D_OT_maya_toggle_micro_manipulator,
+    VIEW3D_OT_maya_set_micro_manipulator_mode,
+    VIEW3D_MT_maya_manipulator_menu,
+    VIEW3D_GGT_maya_micro_manipulator,
+
     VIEW3D_OT_maya_set_view,
     VIEW3D_OT_maya_look_through_camera,
     VIEW3D_MT_maya_view_menu,
@@ -2654,15 +3838,12 @@ MAYA_SPACE_CLASSES = (
 
 
 def register_maya_space_classes():
-    """
-    クラスを登録する。
-
-    スクリプトを再実行しても壊れないよう、
-    同名の既存クラスがあれば先に登録解除する。
-    """
-
-    for cls in MAYA_SPACE_CLASSES:
-        existing = getattr(bpy.types, cls.__name__, None)
+    for cls in reversed(MAYA_SPACE_CLASSES):
+        existing = getattr(
+            bpy.types,
+            cls.__name__,
+            None,
+        )
 
         if existing is not None:
             try:
@@ -2670,6 +3851,7 @@ def register_maya_space_classes():
             except Exception:
                 pass
 
+    for cls in MAYA_SPACE_CLASSES:
         bpy.utils.register_class(cls)
 
 
@@ -2680,22 +3862,20 @@ def register_maya_space_classes():
 def setup_maya_keymap_fixed():
     preferences = bpy.context.preferences
 
+    # 旧Micro Manipulatorが有効な状態で再実行された場合の復旧。
+    restore_maya_micro_space_visibility()
+
     preferences.inputs.use_mouse_emulate_3_button = False
 
     setup_maya_style_zoom_direction(preferences)
 
-    # グラフエディター設定:
-    #   1) キーフレーム点を大きく描画
-    #   2) すべてのハンドルを表示・操作可能にする
-    #   3) 左クリック／左ドラッグは標準キーマップを維持する
     setup_maya_style_graph_theme(preferences)
     setup_graph_editor_handle_display()
     register_graph_display_load_handler()
 
     register_maya_space_classes()
+    register_maya_runtime_properties()
 
-    # 以前のスクリプトで登録したグラフエディターの
-    # 左クリック／左ドラッグ設定も、ここで一度リセットされる。
     if RESET_TO_CLEAN_INDUSTRY_BASE:
         activate_clean_industry_keymap()
 
@@ -2711,7 +3891,7 @@ def setup_maya_keymap_fixed():
         )
 
     # --------------------------------------------------------
-    # スペース=再生をグローバルに無効化
+    # スペース=再生
     # --------------------------------------------------------
 
     disable_space_play_bindings(kc)
@@ -2720,14 +3900,14 @@ def setup_maya_keymap_fixed():
         restore_space_play_in_anim_editors(kc)
 
     # --------------------------------------------------------
-    # グローバルキーポリシーの適用
+    # グローバルキーポリシー
     # --------------------------------------------------------
 
     apply_global_key_policies(kc)
     disable_alt_s_keyinsert_conflicts(kc)
 
     # --------------------------------------------------------
-    # 対象キーマップ
+    # キーマップ取得
     # --------------------------------------------------------
 
     km_3d = get_keymap(
@@ -2810,10 +3990,26 @@ def setup_maya_keymap_fixed():
     )
 
     global_anim_defs = (
-        ('W', 'screen.maya_keyframe_jump', {'next': False}),
-        ('S', 'screen.maya_keyframe_jump', {'next': True}),
-        ('A', 'screen.frame_offset', {'delta': -1}),
-        ('D', 'screen.frame_offset', {'delta': 1}),
+        (
+            'W',
+            'screen.maya_keyframe_jump',
+            {'next': False},
+        ),
+        (
+            'S',
+            'screen.maya_keyframe_jump',
+            {'next': True},
+        ),
+        (
+            'A',
+            'screen.frame_offset',
+            {'delta': -1},
+        ),
+        (
+            'D',
+            'screen.frame_offset',
+            {'delta': 1},
+        ),
     )
 
     for key, operator, properties in global_anim_defs:
@@ -2851,7 +4047,7 @@ def setup_maya_keymap_fixed():
     )
 
     # --------------------------------------------------------
-    # Q / W / E / R（3D View系）
+    # Q / W / E / R
     # --------------------------------------------------------
 
     qwer_defs = (
@@ -2873,66 +4069,85 @@ def setup_maya_keymap_fixed():
             )
 
     # --------------------------------------------------------
-    # W / E / R / F（アニメーションエディター系）
+    # アニメーションエディター W / E / R / F
     # --------------------------------------------------------
 
-    add_binding(km_graph, 'transform.translate', 'W')
-    add_binding(km_graph, 'transform.rotate', 'E')
-    add_binding(km_graph, 'transform.resize', 'R')
+    add_binding(
+        km_graph,
+        'transform.translate',
+        'W',
+    )
+
+    add_binding(
+        km_graph,
+        'transform.rotate',
+        'E',
+    )
+
+    add_binding(
+        km_graph,
+        'transform.resize',
+        'R',
+    )
 
     add_binding(
         km_dopesheet,
         'transform.transform',
         'W',
-        properties={'mode': 'TIME_TRANSLATE'},
+        properties={
+            'mode': 'TIME_TRANSLATE',
+        },
     )
 
     add_binding(
         km_dopesheet,
         'transform.transform',
         'R',
-        properties={'mode': 'TIME_SCALE'},
+        properties={
+            'mode': 'TIME_SCALE',
+        },
     )
 
     add_binding(
         km_nla,
         'transform.transform',
         'W',
-        properties={'mode': 'TRANSLATION'},
+        properties={
+            'mode': 'TRANSLATION',
+        },
     )
 
     add_binding(
         km_nla,
         'transform.transform',
         'R',
-        properties={'mode': 'TIME_SCALE'},
+        properties={
+            'mode': 'TIME_SCALE',
+        },
     )
 
-    add_binding(km_graph, 'graph.view_selected', 'F')
-    add_binding(km_dopesheet, 'action.view_selected', 'F')
-    add_binding(km_nla, 'nla.view_selected', 'F')
+    add_binding(
+        km_graph,
+        'graph.view_selected',
+        'F',
+    )
+
+    add_binding(
+        km_dopesheet,
+        'action.view_selected',
+        'F',
+    )
+
+    add_binding(
+        km_nla,
+        'nla.view_selected',
+        'F',
+    )
 
     # --------------------------------------------------------
-    # グラフエディターの左マウス操作
+    # グラフエディター
     # --------------------------------------------------------
 
-    # 重要:
-    # graph.clickselect や graph.select_box のLEFTMOUSE設定は
-    # このスクリプトでは一切上書きしない。
-    #
-    # Industry Compatible標準の左クリック／左ドラッグを維持するため、
-    # キーフレーム点やベジェハンドルを直接つかんでドラッグできる。
-    #
-    # 以前のバージョンに存在した以下の独自設定は削除済み:
-    #   ・左クリック = graph.clickselect
-    #   ・左ドラッグ = graph.select_box（tweak=False）
-    #   ・Shift/Ctrl付き左ドラッグの独自ボックス選択
-    #
-    # 修正版を初めて実行するときは、
-    # RESET_TO_CLEAN_INDUSTRY_BASE=True にして旧設定を消すこと。
-
-    # Shift+中ドラッグだけは追加のMaya風機能として残す。
-    # 左マウスによるハンドル操作には干渉しない。
     add_binding(
         km_graph,
         'graph.maya_slide_keys',
@@ -2941,7 +4156,7 @@ def setup_maya_keymap_fixed():
     )
 
     # --------------------------------------------------------
-    # 2Dエディター共通: Alt+中/右ドラッグでパン/ズーム
+    # 2Dエディター共通ナビゲーション
     # --------------------------------------------------------
 
     add_binding(
@@ -2963,12 +4178,42 @@ def setup_maya_keymap_fixed():
     # --------------------------------------------------------
 
     anim_defs = (
-        ('Z', 'ed.undo', {}, False),
-        ('Q', 'screen.animation_play', {}, True),
-        ('A', 'screen.frame_offset', {'delta': -1}, True),
-        ('D', 'screen.frame_offset', {'delta': 1}, True),
-        ('W', 'screen.maya_keyframe_jump', {'next': False}, True),
-        ('S', 'screen.maya_keyframe_jump', {'next': True}, True),
+        (
+            'Z',
+            'ed.undo',
+            {},
+            False,
+        ),
+        (
+            'Q',
+            'screen.animation_play',
+            {},
+            True,
+        ),
+        (
+            'A',
+            'screen.frame_offset',
+            {'delta': -1},
+            True,
+        ),
+        (
+            'D',
+            'screen.frame_offset',
+            {'delta': 1},
+            True,
+        ),
+        (
+            'W',
+            'screen.maya_keyframe_jump',
+            {'next': False},
+            True,
+        ),
+        (
+            'S',
+            'screen.maya_keyframe_jump',
+            {'next': True},
+            True,
+        ),
     )
 
     animation_keymaps = (
@@ -3011,7 +4256,27 @@ def setup_maya_keymap_fixed():
         )
 
     # --------------------------------------------------------
-    # スペースキー = Maya式
+    # Ctrl+Shift+右クリック
+    # Manipulator Orientation / Micro Manipulator
+    # --------------------------------------------------------
+
+    for km_target in mode_keymaps:
+        add_binding(
+            km_target,
+            'wm.call_menu',
+            'RIGHTMOUSE',
+            ctrl=True,
+            shift=True,
+            repeat=False,
+            properties={
+                'name': (
+                    VIEW3D_MT_maya_manipulator_menu.bl_idname
+                ),
+            },
+        )
+
+    # --------------------------------------------------------
+    # スペースキー
     # --------------------------------------------------------
 
     add_binding(
@@ -3057,7 +4322,7 @@ def setup_maya_keymap_fixed():
         )
 
     # --------------------------------------------------------
-    # F = 選択対象にフォーカス（3D View系）
+    # F = フォーカス
     # --------------------------------------------------------
 
     for km_target in (
@@ -3199,7 +4464,7 @@ def setup_maya_keymap_fixed():
         print(f"✅ キーマッププリセット保存: {target_file}")
 
     # --------------------------------------------------------
-    # 環境設定の保存
+    # 環境設定保存
     # --------------------------------------------------------
 
     try:
@@ -3210,37 +4475,41 @@ def setup_maya_keymap_fixed():
 
     print("🎉 Maya風キーマップの設定が完了しました。")
     print("   Alt+左: 回転 / Alt+中: パン / Alt+右: ズーム")
-    print("   （グラフ/ドープシート/NLAでも Alt+中=パン、Alt+右=ズーム）")
     print("   F: 選択対象へフォーカス")
     print("   Space単押し: 1画面 / 4分割 トグル")
     print("   Space長押し: Hotbox風パイメニュー")
     print("")
-    print("   ▼ 以下はカーソルがどのエディター上にあっても有効:")
+    print("   ▼ Manipulator:")
+    print("   Ctrl+Shift+右クリック: Manipulator Settings")
+    print("      ・Global / Local / Gimbal")
+    print("      ・Micro Manipulator ON / OFF")
+    print("      ・W/E/R連動、Move/Rotate/Scale固定")
+    print("   Micro Manipulator:")
+    print("      通常の約1/10感度で高精度操作")
+    print("")
+    print("   ▼ 以下はどのエディター上でも有効:")
     print("   Z: Undo")
     print("   Alt+Q: 再生 / 停止")
-    print("   Alt+W / Alt+S: 前後のキーフレームへジャンプ")
+    print("   Alt+W / Alt+S: 前後のキーフレーム")
     print("   Alt+A / Alt+D: 1フレーム移動")
     print("   Alt+1: コントローラー表示 / 非表示")
     print("   Alt+テンキー* または Alt+Shift+8:")
     print("      選択対象のトランスフォームを初期化")
     print("")
     print("   ▼ グラフエディター:")
-    print("   ・キーフレーム点とハンドル端点を大きく表示")
-    print("   ・選択中のキーだけに限定せずハンドルを表示")
-    print("   ・左クリック／左ドラッグはIndustry Compatible標準")
-    print("   ・ベジェハンドルを直接つかんでドラッグ可能")
-    print("   ・Shift+中ドラッグ: 最初に動かした方向で軸ロック")
-    print("       左右 → フレームのみ移動")
-    print("       上下 → 値のみ移動")
+    print("   Shift+中ドラッグ: 軸ロックキー移動")
     print("")
-    print("ℹ️ 修正版を初めて実行するときは、")
-    print("   RESET_TO_CLEAN_INDUSTRY_BASE=True のまま実行してください。")
-    print("   旧スクリプトの左マウス設定が削除されます。")
+    print("ℹ️ 初回実行時は")
+    print("   RESET_TO_CLEAN_INDUSTRY_BASE=True")
+    print("   のまま実行してください。")
     print("")
-    print("⚠️ カスタムオペレーターをBlender再起動後も使うには、")
-    print("   スクリプトのRegisterを有効にしてスタートアップを保存するか、")
-    print("   アドオン化してインストールしてください。")
+    print("⚠️ カスタムオペレーターとMicro Manipulatorを")
+    print("   Blender再起動後も使うにはアドオン化するか、")
+    print("   スクリプトのRegisterを有効にしてください。")
 
 
+# ============================================================
 # 実行
+# ============================================================
+
 setup_maya_keymap_fixed()
