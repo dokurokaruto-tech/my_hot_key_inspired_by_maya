@@ -1,3 +1,15 @@
+bl_info = {
+    "name": "My Hot Key Inspired by Maya",
+    "author": "dokurokaruto",
+    "version": (1, 1, 0),
+    "blender": (3, 0, 0),
+    "location": "Preferences > Keymap",
+    "description": "Maya-inspired hotkeys, hotbox pie menus, and micro manipulator.",
+    "warning": "",
+    "doc_url": "",
+    "category": "System",
+}
+
 import bpy
 import bmesh
 import os
@@ -4926,7 +4938,51 @@ def setup_maya_keymap_fixed():
 
 
 # ============================================================
-# 実行
+# アドオン登録
 # ============================================================
 
-setup_maya_keymap_fixed()
+def register():
+    setup_maya_keymap_fixed()
+
+def unregister():
+    for cls in reversed(MAYA_SPACE_CLASSES):
+        existing = getattr(bpy.types, cls.__name__, None)
+        if existing is not None:
+            try:
+                bpy.utils.unregister_class(existing)
+            except Exception:
+                pass
+    
+    for class_name in LEGACY_CLASS_NAMES:
+        existing = getattr(bpy.types, class_name, None)
+        if existing is not None:
+            try:
+                bpy.utils.unregister_class(existing)
+            except Exception:
+                pass
+
+    property_names = (
+        "maya_micro_manipulator_enabled",
+        "maya_micro_manipulator_mode",
+        "maya_micro_visibility_owned",
+        "maya_micro_previous_show_gizmo",
+        "maya_micro_previous_show_gizmo_tool",
+        "maya_micro_previous_show_gizmo_context",
+    )
+    for property_name in property_names:
+        if hasattr(bpy.types.WindowManager, property_name):
+            try:
+                delattr(bpy.types.WindowManager, property_name)
+            except Exception:
+                pass
+                
+    handlers = bpy.app.handlers.load_post
+    for handler in list(handlers):
+        if getattr(handler, "__name__", "") == "_maya_graph_display_load_post":
+            try:
+                handlers.remove(handler)
+            except Exception:
+                pass
+
+if __name__ == "__main__":
+    register()
