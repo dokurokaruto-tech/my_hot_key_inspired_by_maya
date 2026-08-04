@@ -1,3 +1,19 @@
+bl_info = {
+    "name": "My Hot Key Inspired by Maya",
+    "author": "dokurokaruto",
+    "version": (1, 0, 0),
+    "blender": (3, 6, 0),
+    "location": "Keymap / 3D View / Graph Editor",
+    "description": (
+        "Maya風のホットキー・ナビゲーション・"
+        "Micro Manipulator・Hotbox を提供するアドオン"
+    ),
+    "warning": "",
+    "doc_url": "",
+    "category": "3D View",
+}
+
+
 import bpy
 import bmesh
 import os
@@ -7,42 +23,290 @@ import mathutils
 
 
 # ============================================================
-# 設定
+# アドオン設定（再起動後も Preferences に保持）
 # ============================================================
 
-RESET_TO_CLEAN_INDUSTRY_BASE = True
-SAVE_AS_PRESET = True
-PRESET_FILENAME = "my_hot_key_inspired_by_maya.py"
+ADDON_ID = (
+    __name__
+    if __name__ != "__main__"
+    else "my_hot_key_inspired_by_maya"
+)
 
+# 実行時に登録したアドオンキーマップ (km, kmi)
+_addon_keymaps = []
+
+# グローバルポリシー等で無効化したユーザーキーマップ項目
+# (keymap_name, kmi_id)
+_disabled_user_keymap_item_ids = []
+
+
+def _addon_prefs(context=None):
+    """アドオン設定を取得する。未登録時は None。"""
+    try:
+        addons = (context or bpy.context).preferences.addons
+    except Exception:
+        return None
+
+    # パッケージ名 / モジュール名の両方に対応
+    for key in (ADDON_ID, ADDON_ID.split(".")[-1], __package__ or ""):
+        if not key:
+            continue
+        try:
+            mod = addons.get(key)
+        except Exception:
+            mod = None
+        if mod is not None:
+            return getattr(mod, "preferences", None)
+
+    # フォールバック: 名前部分一致
+    try:
+        for mod in addons:
+            if ADDON_ID in mod.module or mod.module.endswith(
+                "my_hot_key_inspired_by_maya"
+            ):
+                return mod.preferences
+    except Exception:
+        pass
+
+    return None
+
+
+def _pref_value(name, default):
+    prefs = _addon_prefs()
+    if prefs is None:
+        return default
+    return getattr(prefs, name, default)
+
+
+# 後方互換用のモジュール定数（オペレーター本体が参照）
+# アドオン有効時は Preferences の値が優先されるようプロパティで読む。
 SPACE_HOLD_TIME = 0.3
 KEEP_SPACE_PLAY_IN_ANIM_EDITORS = True
-
 ALT1_ALSO_TOGGLE_EMPTIES = False
 RESET_DELTA_TRANSFORMS = True
-
 GRAPH_KEY_VERTEX_SIZE = 6
 GRAPH_HANDLE_VERTEX_SIZE = 5
-
 SLIDE_SNAP_FRAMES = True
 SLIDE_AXIS_LOCK_THRESHOLD_PX = 5
-
-# ------------------------------------------------------------
-# Manipulator Orientation / Micro Manipulator
-# ------------------------------------------------------------
-
-# Micro ManipulatorはBlenderの精密変形モードを使用する。
-# 標準変形におけるShift精密操作と同じ、約1/10の感度。
-MICRO_MANIPULATOR_FACTOR = 0.1
-
-# Micro Manipulatorの表示サイズ。
 MICRO_MANIPULATOR_GIZMO_SCALE = 1.0
-
-# Micro Manipulatorで使用可能な方向。
 MICRO_ORIENTATION_TYPES = {
     'GLOBAL',
     'LOCAL',
     'GIMBAL',
 }
+PRESET_FILENAME = "my_hot_key_inspired_by_maya.py"
+
+
+def get_space_hold_time():
+    return float(_pref_value("space_hold_time", SPACE_HOLD_TIME))
+
+
+def get_keep_space_play_in_anim_editors():
+    return bool(
+        _pref_value(
+            "keep_space_play_in_anim_editors",
+            KEEP_SPACE_PLAY_IN_ANIM_EDITORS,
+        )
+    )
+
+
+def get_alt1_also_toggle_empties():
+    return bool(
+        _pref_value(
+            "alt1_also_toggle_empties",
+            ALT1_ALSO_TOGGLE_EMPTIES,
+        )
+    )
+
+
+def get_reset_delta_transforms():
+    return bool(
+        _pref_value(
+            "reset_delta_transforms",
+            RESET_DELTA_TRANSFORMS,
+        )
+    )
+
+
+def get_graph_key_vertex_size():
+    return int(
+        _pref_value("graph_key_vertex_size", GRAPH_KEY_VERTEX_SIZE)
+    )
+
+
+def get_graph_handle_vertex_size():
+    return int(
+        _pref_value(
+            "graph_handle_vertex_size",
+            GRAPH_HANDLE_VERTEX_SIZE,
+        )
+    )
+
+
+def get_slide_snap_frames():
+    return bool(_pref_value("slide_snap_frames", SLIDE_SNAP_FRAMES))
+
+
+def get_slide_axis_lock_threshold_px():
+    return int(
+        _pref_value(
+            "slide_axis_lock_threshold_px",
+            SLIDE_AXIS_LOCK_THRESHOLD_PX,
+        )
+    )
+
+
+def get_micro_manipulator_gizmo_scale():
+    return float(
+        _pref_value(
+            "micro_manipulator_gizmo_scale",
+            MICRO_MANIPULATOR_GIZMO_SCALE,
+        )
+    )
+
+
+class MAYA_HOTKEY_AT_preferences(bpy.types.AddonPreferences):
+    bl_idname = ADDON_ID
+
+    use_industry_compatible_base: bpy.props.BoolProperty(
+        name="Industry Compatible をベースにする",
+        description=(
+            "アドオン有効化時に Industry Compatible キー設定を読み込む。"
+            "競合の少ない Maya 風操作の土台になります"
+        ),
+        default=True,
+    )
+
+    restore_user_keymap_on_base: bpy.props.BoolProperty(
+        name="読み込み時にユーザーキーマップをリセット",
+        description=(
+            "Industry Compatible 読み込み後、ユーザー変更キーを"
+            "すべてリセットする（初回セットアップ向け・破壊的）"
+        ),
+        default=False,
+    )
+
+    apply_maya_zoom: bpy.props.BoolProperty(
+        name="Maya式ズーム方向を適用",
+        description="Dolly / 水平ドラッグ / 反転なし",
+        default=True,
+    )
+
+    disable_mouse_emulate_3_button: bpy.props.BoolProperty(
+        name="3ボタンマウスエミュレートを無効化",
+        description=(
+            "Alt+LMB 回転などと競合するため無効化を推奨"
+        ),
+        default=True,
+    )
+
+    keep_space_play_in_anim_editors: bpy.props.BoolProperty(
+        name="アニメーションエディターで Space=再生を維持",
+        default=True,
+    )
+
+    space_hold_time: bpy.props.FloatProperty(
+        name="Space / D 長押し判定（秒）",
+        default=0.3,
+        min=0.05,
+        max=2.0,
+        subtype='TIME',
+    )
+
+    alt1_also_toggle_empties: bpy.props.BoolProperty(
+        name="Alt+1 で Empty 表示も切替",
+        default=False,
+    )
+
+    reset_delta_transforms: bpy.props.BoolProperty(
+        name="トランスフォーム初期化で Delta もリセット",
+        default=True,
+    )
+
+    graph_key_vertex_size: bpy.props.IntProperty(
+        name="グラフ キー点サイズ",
+        default=6,
+        min=1,
+        max=20,
+    )
+
+    graph_handle_vertex_size: bpy.props.IntProperty(
+        name="グラフ ハンドル点サイズ",
+        default=5,
+        min=1,
+        max=20,
+    )
+
+    slide_snap_frames: bpy.props.BoolProperty(
+        name="Shift+MMB キー移動でフレームにスナップ",
+        default=True,
+    )
+
+    slide_axis_lock_threshold_px: bpy.props.IntProperty(
+        name="軸ロック判定ピクセル",
+        default=5,
+        min=1,
+        max=50,
+    )
+
+    micro_manipulator_gizmo_scale: bpy.props.FloatProperty(
+        name="Micro Manipulator サイズ",
+        default=1.0,
+        min=0.1,
+        max=5.0,
+    )
+
+    def draw(self, context):
+        layout = self.layout
+
+        col = layout.column(align=True)
+        col.label(text="起動・ベースキーマップ", icon='PREFERENCES')
+        col.prop(self, "use_industry_compatible_base")
+        sub = col.column(align=True)
+        sub.enabled = self.use_industry_compatible_base
+        sub.prop(self, "restore_user_keymap_on_base")
+        col.prop(self, "apply_maya_zoom")
+        col.prop(self, "disable_mouse_emulate_3_button")
+
+        layout.separator()
+        col = layout.column(align=True)
+        col.label(text="操作", icon='MOUSE_MMB')
+        col.prop(self, "space_hold_time")
+        col.prop(self, "keep_space_play_in_anim_editors")
+        col.prop(self, "alt1_also_toggle_empties")
+        col.prop(self, "reset_delta_transforms")
+        col.prop(self, "slide_snap_frames")
+        col.prop(self, "slide_axis_lock_threshold_px")
+
+        layout.separator()
+        col = layout.column(align=True)
+        col.label(text="表示", icon='HIDE_OFF')
+        col.prop(self, "graph_key_vertex_size")
+        col.prop(self, "graph_handle_vertex_size")
+        col.prop(self, "micro_manipulator_gizmo_scale")
+
+        layout.separator()
+        row = layout.row(align=True)
+        row.operator(
+            "wm.maya_hotkey_reapply_keymap",
+            icon='FILE_REFRESH',
+        )
+        row.operator(
+            "wm.maya_hotkey_export_preset",
+            icon='EXPORT',
+        )
+
+        box = layout.box()
+        box.label(text="主なショートカット", icon='INFO')
+        col = box.column(align=True)
+        col.label(text="Alt+LMB/MMB/RMB: 回転 / パン / ズーム")
+        col.label(text="Space 単押し: 四分割トグル / 長押し: Hotbox")
+        col.label(text="Q/W/E/R: 選択 / 移動 / 回転 / スケール")
+        col.label(text="Ctrl+Shift+RMB: Manipulator Settings")
+        col.label(text="Z: Undo / Alt+Q: 再生")
+        col.label(text="Alt+W/S: キー移動 / Alt+A/D: 1F 移動")
+        col.label(text="Alt+1: コントローラー表示切替")
+        col.label(text="Alt+* または Alt+Shift+8: トランスフォーム初期化")
 
 
 # ============================================================
@@ -79,50 +343,9 @@ def find_industry_compatible_preset():
     return None
 
 
-def activate_clean_industry_keymap():
-    filepath = find_industry_compatible_preset()
-
-    if not filepath:
-        raise RuntimeError(
-            "Industry Compatibleキーマップが見つかりませんでした。"
-        )
-
-    result = bpy.utils.keyconfig_set(filepath)
-
-    if result is False:
-        raise RuntimeError(
-            "Industry Compatibleキーマップを有効化できませんでした。"
-        )
-
-    result = bpy.ops.preferences.keymap_restore(all=True)
-
-    if 'FINISHED' not in result:
-        raise RuntimeError(
-            "ユーザーキーマップをリセットできませんでした。"
-        )
-
-
 # ============================================================
 # キーマップ操作用ヘルパー
 # ============================================================
-
-def get_keymap(
-    keyconfig,
-    name,
-    space_type='EMPTY',
-    region_type='WINDOW',
-):
-    km = keyconfig.keymaps.get(name)
-
-    if km is None:
-        km = keyconfig.keymaps.new(
-            name=name,
-            space_type=space_type,
-            region_type=region_type,
-        )
-
-    return km
-
 
 def is_exact_event(
     kmi,
@@ -164,94 +387,6 @@ def is_exact_event(
         return False
 
     return True
-
-
-def remove_exact_event(
-    km,
-    event_type,
-    value='PRESS',
-    shift=False,
-    ctrl=False,
-    alt=False,
-    oskey=False,
-):
-    for kmi in list(km.keymap_items):
-        if is_exact_event(
-            kmi,
-            event_type,
-            value=value,
-            shift=shift,
-            ctrl=ctrl,
-            alt=alt,
-            oskey=oskey,
-        ):
-            km.keymap_items.remove(kmi)
-
-
-def add_binding(
-    km,
-    operator,
-    event_type,
-    value='PRESS',
-    *,
-    shift=False,
-    ctrl=False,
-    alt=False,
-    oskey=False,
-    repeat=None,
-    properties=None,
-):
-    remove_exact_event(
-        km,
-        event_type,
-        value=value,
-        shift=shift,
-        ctrl=ctrl,
-        alt=alt,
-        oskey=oskey,
-    )
-
-    arguments = {
-        "type": event_type,
-        "value": value,
-        "shift": shift,
-        "ctrl": ctrl,
-        "alt": alt,
-        "oskey": oskey,
-    }
-
-    try:
-        kmi = km.keymap_items.new(
-            operator,
-            head=True,
-            **arguments,
-        )
-    except TypeError:
-        kmi = km.keymap_items.new(
-            operator,
-            **arguments,
-        )
-
-    if repeat is not None:
-        try:
-            kmi.repeat = repeat
-        except Exception:
-            pass
-
-    for property_name, property_value in (properties or {}).items():
-        try:
-            setattr(
-                kmi.properties,
-                property_name,
-                property_value,
-            )
-        except Exception as error:
-            print(
-                f"⚠️ {operator}.{property_name} を設定できませんでした: "
-                f"{error}"
-            )
-
-    return kmi
 
 
 # ============================================================
@@ -334,226 +469,9 @@ GLOBAL_KEY_POLICIES = (
 )
 
 
-def apply_global_key_policies(keyconfig):
-    disabled_count = 0
-
-    for km in keyconfig.keymaps:
-        for kmi in km.keymap_items:
-            for (
-                event_type,
-                value,
-                shift,
-                ctrl,
-                alt,
-                keep_idnames,
-            ) in GLOBAL_KEY_POLICIES:
-
-                if kmi.idname in keep_idnames:
-                    continue
-
-                if is_exact_event(
-                    kmi,
-                    event_type,
-                    value=value,
-                    shift=shift,
-                    ctrl=ctrl,
-                    alt=alt,
-                ):
-                    if kmi.active:
-                        kmi.active = False
-                        disabled_count += 1
-
-                    break
-
-    print(
-        f"🔇 グローバルキーポリシーにより {disabled_count} 件の"
-        "競合割り当てを無効化しました。"
-    )
-
-
-def disable_alt_s_keyinsert_conflicts(keyconfig):
-    keyframe_insert_prefixes = (
-        'anim.keyframe_insert',
-    )
-
-    disabled_count = 0
-
-    for km in keyconfig.keymaps:
-        for kmi in km.keymap_items:
-            if kmi.type != 'S':
-                continue
-
-            is_keyframe_insert = any(
-                kmi.idname.startswith(prefix)
-                for prefix in keyframe_insert_prefixes
-            )
-
-            if not is_keyframe_insert:
-                continue
-
-            if kmi.any or kmi.alt:
-                if kmi.active:
-                    kmi.active = False
-                    disabled_count += 1
-
-    print(
-        f"🔇 Alt+Sで誤発動するキー挿入を {disabled_count} 件"
-        "無効化しました。"
-    )
-
-
-def force_q_select_box_no_cycle(keyconfig):
-    """Qキーのツール割り当てから cycle を除去し、
-    矩形選択（builtin.select_box）に固定する。
-
-    Industry Compatible等では Q に cycle=True が付いており、
-    連打すると投げ縄・サークル選択へ切り替わってしまうため、
-    全キーマップを走査して強制的に固定する。
-    """
-    fixed_cycle_count = 0
-    fixed_name_count = 0
-
-    tool_set_idnames = {
-        'wm.tool_set_by_id',
-        'wm.tool_set_by_index',
-    }
-
-    for km in keyconfig.keymaps:
-        for kmi in km.keymap_items:
-            if kmi.type != 'Q':
-                continue
-
-            if kmi.idname not in tool_set_idnames:
-                continue
-
-            properties = kmi.properties
-
-            try:
-                if getattr(properties, "cycle", False):
-                    properties.cycle = False
-                    fixed_cycle_count += 1
-            except Exception:
-                pass
-
-            # 修飾キーなしのQで選択系ツールを呼ぶ割り当ては
-            # すべて矩形選択に固定する。
-            try:
-                if (
-                    not kmi.any and
-                    not kmi.shift and
-                    not kmi.ctrl and
-                    not kmi.alt and
-                    not kmi.oskey
-                ):
-                    name = getattr(properties, "name", "")
-
-                    if (
-                        isinstance(name, str) and
-                        name.startswith("builtin.select") and
-                        name != "builtin.select_box"
-                    ):
-                        properties.name = "builtin.select_box"
-                        fixed_name_count += 1
-            except Exception:
-                pass
-
-    print(
-        f"🔒 Qキーのツール切替: cycle無効化 {fixed_cycle_count} 件 / "
-        f"矩形選択へ固定 {fixed_name_count} 件"
-    )
-
-
-# ============================================================
-# スペース=再生の無効化
-# ============================================================
-
-def disable_space_play_bindings(keyconfig):
-    disabled_count = 0
-
-    for km in keyconfig.keymaps:
-        for kmi in km.keymap_items:
-            if kmi.idname != 'screen.animation_play':
-                continue
-
-            if not is_exact_event(kmi, 'SPACE', value='PRESS'):
-                continue
-
-            if kmi.active:
-                kmi.active = False
-                disabled_count += 1
-
-    print(
-        f"🔇 スペース=再生の割り当てを {disabled_count} 件"
-        "無効化しました。"
-    )
-
-
-def restore_space_play_in_anim_editors(keyconfig):
-    anim_editor_defs = (
-        ("Dopesheet", 'DOPESHEET_EDITOR'),
-        ("Graph Editor", 'GRAPH_EDITOR'),
-        ("NLA Editor", 'NLA_EDITOR'),
-    )
-
-    for keymap_name, space_type in anim_editor_defs:
-        km = get_keymap(
-            keyconfig,
-            keymap_name,
-            space_type=space_type,
-        )
-
-        add_binding(
-            km,
-            'screen.animation_play',
-            'SPACE',
-            repeat=False,
-        )
-
-
-# ============================================================
-# Maya式ズーム方向
-# ============================================================
-
-def setup_maya_style_zoom_direction(preferences):
-    inputs = preferences.inputs
-
-    inputs.view_zoom_method = 'DOLLY'
-    inputs.view_zoom_axis = 'HORIZONTAL'
-    inputs.invert_mouse_zoom = False
-
-
 # ============================================================
 # グラフエディター表示設定
 # ============================================================
-
-def setup_maya_style_graph_theme(preferences):
-    try:
-        theme = preferences.themes[0]
-    except Exception as error:
-        print(f"⚠️ テーマを取得できませんでした: {error}")
-        return
-
-    graph_theme = getattr(theme, "graph_editor", None)
-
-    if graph_theme is None:
-        print("⚠️ グラフエディターのテーマ設定が見つかりませんでした。")
-        return
-
-    try:
-        graph_theme.vertex_size = GRAPH_KEY_VERTEX_SIZE
-    except Exception as error:
-        print(f"⚠️ vertex_size を設定できませんでした: {error}")
-
-    try:
-        graph_theme.handle_vertex_size = GRAPH_HANDLE_VERTEX_SIZE
-    except Exception:
-        pass
-
-    print(
-        f"✅ グラフエディターのキーフレーム点サイズを "
-        f"{GRAPH_KEY_VERTEX_SIZE} に拡大しました。"
-    )
-
 
 def setup_graph_editor_handle_display():
     configured_count = 0
@@ -590,16 +508,9 @@ def setup_graph_editor_handle_display():
     )
 
 
+@bpy.app.handlers.persistent
 def _maya_graph_display_load_post(_dummy):
     setup_graph_editor_handle_display()
-
-
-try:
-    _maya_graph_display_load_post = bpy.app.handlers.persistent(
-        _maya_graph_display_load_post
-    )
-except Exception:
-    pass
 
 
 def register_graph_display_load_handler():
@@ -613,6 +524,17 @@ def register_graph_display_load_handler():
                 pass
 
     handlers.append(_maya_graph_display_load_post)
+
+
+def unregister_graph_display_load_handler():
+    handlers = bpy.app.handlers.load_post
+
+    for handler in list(handlers):
+        if getattr(handler, "__name__", "") == "_maya_graph_display_load_post":
+            try:
+                handlers.remove(handler)
+            except Exception:
+                pass
 
 
 # ============================================================
@@ -1346,6 +1268,24 @@ def register_maya_runtime_properties():
             options={'HIDDEN', 'SKIP_SAVE'},
         )
     )
+
+
+def unregister_maya_runtime_properties():
+    property_names = (
+        "maya_micro_manipulator_enabled",
+        "maya_micro_manipulator_mode",
+        "maya_micro_visibility_owned",
+        "maya_micro_previous_show_gizmo",
+        "maya_micro_previous_show_gizmo_tool",
+        "maya_micro_previous_show_gizmo_context",
+    )
+
+    for property_name in property_names:
+        if hasattr(bpy.types.WindowManager, property_name):
+            try:
+                delattr(bpy.types.WindowManager, property_name)
+            except Exception:
+                pass
 
 
 def _micro_average_vectors(vectors):
@@ -2168,7 +2108,7 @@ class VIEW3D_GGT_maya_micro_manipulator(
             move_gizmo.color_highlight = (1.0, 1.0, 0.2)
             move_gizmo.alpha_highlight = 1.0
             move_gizmo.scale_basis = (
-                MICRO_MANIPULATOR_GIZMO_SCALE
+                get_micro_manipulator_gizmo_scale()
             )
 
             self._gizmo_groups['MOVE'].append(
@@ -2221,7 +2161,7 @@ class VIEW3D_GGT_maya_micro_manipulator(
             rotate_gizmo.color_highlight = (1.0, 1.0, 0.2)
             rotate_gizmo.alpha_highlight = 1.0
             rotate_gizmo.scale_basis = (
-                MICRO_MANIPULATOR_GIZMO_SCALE * 1.15
+                get_micro_manipulator_gizmo_scale() * 1.15
             )
 
             self._gizmo_groups['ROTATE'].append(
@@ -2275,7 +2215,7 @@ class VIEW3D_GGT_maya_micro_manipulator(
             scale_gizmo.color_highlight = (1.0, 1.0, 0.2)
             scale_gizmo.alpha_highlight = 1.0
             scale_gizmo.scale_basis = (
-                MICRO_MANIPULATOR_GIZMO_SCALE
+                get_micro_manipulator_gizmo_scale()
             )
 
             self._gizmo_groups['SCALE'].append(
@@ -2507,7 +2447,7 @@ class VIEW3D_OT_maya_space(bpy.types.Operator):
 
             elapsed = time.monotonic() - self._start_time
 
-            if elapsed >= SPACE_HOLD_TIME:
+            if elapsed >= get_space_hold_time():
                 self._open_hotbox(context)
             else:
                 self._toggle_quad_view(context)
@@ -2520,7 +2460,7 @@ class VIEW3D_OT_maya_space(bpy.types.Operator):
         if event.type == 'TIMER':
             elapsed = time.monotonic() - self._start_time
 
-            if elapsed >= SPACE_HOLD_TIME:
+            if elapsed >= get_space_hold_time():
                 self._remove_timer(context)
                 self._open_hotbox(context)
                 return {'FINISHED'}
@@ -2657,7 +2597,7 @@ class GRAPH_OT_maya_d_key(bpy.types.Operator):
 
             elapsed = time.monotonic() - self._start_time
 
-            if elapsed >= SPACE_HOLD_TIME:
+            if elapsed >= get_space_hold_time():
                 self._open_menu(context)
             else:
                 self._apply_auto_clamped(context)
@@ -2670,7 +2610,7 @@ class GRAPH_OT_maya_d_key(bpy.types.Operator):
         if event.type == 'TIMER':
             elapsed = time.monotonic() - self._start_time
 
-            if elapsed >= SPACE_HOLD_TIME:
+            if elapsed >= get_space_hold_time():
                 self._remove_timer(context)
                 self._open_menu(context)
                 return {'FINISHED'}
@@ -2760,7 +2700,7 @@ class VIEW3D_OT_maya_toggle_controllers(bpy.types.Operator):
         show = not overlay.show_bones
         overlay.show_bones = show
 
-        if ALT1_ALSO_TOGGLE_EMPTIES:
+        if get_alt1_also_toggle_empties():
             try:
                 space.show_object_viewport_empty = show
             except Exception:
@@ -3352,7 +3292,7 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
             for obj in selected:
                 self._reset_transform_channels(
                     obj,
-                    include_delta=RESET_DELTA_TRANSFORMS,
+                    include_delta=get_reset_delta_transforms(),
                 )
                 reset_count += 1
 
@@ -3360,7 +3300,7 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
                     if self._insert_reset_keys(
                         context,
                         obj,
-                        include_delta=RESET_DELTA_TRANSFORMS,
+                        include_delta=get_reset_delta_transforms(),
                     ):
                         keyed_count += 1
 
@@ -3543,7 +3483,7 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
             if max(
                 abs(pixel_dx),
                 abs(pixel_dy),
-            ) < SLIDE_AXIS_LOCK_THRESHOLD_PX:
+            ) < get_slide_axis_lock_threshold_px():
                 return
 
             self._axis = (
@@ -3566,7 +3506,7 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
         if self._axis == 'FRAME':
             delta_value = 0.0
 
-            if SLIDE_SNAP_FRAMES and not event.ctrl:
+            if get_slide_snap_frames() and not event.ctrl:
                 delta_frame = float(round(delta_frame))
         else:
             delta_frame = 0.0
@@ -4230,112 +4170,485 @@ def register_maya_space_classes():
         bpy.utils.register_class(cls)
 
 
+def unregister_maya_space_classes():
+    for cls in reversed(MAYA_SPACE_CLASSES):
+        existing = getattr(bpy.types, cls.__name__, None)
+
+        if existing is not None:
+            try:
+                bpy.utils.unregister_class(existing)
+            except Exception:
+                pass
+
+    for class_name in LEGACY_CLASS_NAMES:
+        existing = getattr(bpy.types, class_name, None)
+
+        if existing is not None:
+            try:
+                bpy.utils.unregister_class(existing)
+            except Exception:
+                pass
+
+
 # ============================================================
-# メイン処理
+# キーマップ登録（アドオンキーコンフィグ）
 # ============================================================
 
-def setup_maya_keymap_fixed():
-    preferences = bpy.context.preferences
+def _clear_addon_keymaps():
+    seen_kms = []
+    for km, kmi in _addon_keymaps:
+        try:
+            km.keymap_items.remove(kmi)
+        except Exception:
+            pass
+        if km not in seen_kms:
+            seen_kms.append(km)
 
-    # 旧Micro Manipulatorが有効な状態で再実行された場合の復旧。
-    restore_maya_micro_space_visibility()
+    # 再利用キーマップ上に残骸があれば一掃する
+    for km in seen_kms:
+        try:
+            for kmi in list(km.keymap_items):
+                try:
+                    km.keymap_items.remove(kmi)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
-    preferences.inputs.use_mouse_emulate_3_button = False
+    _addon_keymaps.clear()
 
-    setup_maya_style_zoom_direction(preferences)
 
-    setup_maya_style_graph_theme(preferences)
-    setup_graph_editor_handle_display()
-    register_graph_display_load_handler()
-
-    register_maya_space_classes()
-    register_maya_runtime_properties()
-
-    if RESET_TO_CLEAN_INDUSTRY_BASE:
-        activate_clean_industry_keymap()
-
-        preferences.inputs.use_mouse_emulate_3_button = False
-        setup_maya_style_zoom_direction(preferences)
-
+def _restore_disabled_user_keymap_items():
     wm = bpy.context.window_manager
     kc = wm.keyconfigs.user
 
     if not kc:
+        _disabled_user_keymap_item_ids.clear()
+        return
+
+    for keymap_name, item_id in list(_disabled_user_keymap_item_ids):
+        km = kc.keymaps.get(keymap_name)
+        if km is None:
+            continue
+
+        for kmi in km.keymap_items:
+            if kmi.id == item_id:
+                try:
+                    kmi.active = True
+                except Exception:
+                    pass
+                break
+
+    _disabled_user_keymap_item_ids.clear()
+
+
+def _track_disable_kmi(km, kmi):
+    if kmi.active:
+        kmi.active = False
+        _disabled_user_keymap_item_ids.append((km.name, kmi.id))
+        return True
+    return False
+
+
+def apply_global_key_policies(keyconfig):
+    disabled_count = 0
+
+    for km in keyconfig.keymaps:
+        for kmi in km.keymap_items:
+            for (
+                event_type,
+                value,
+                shift,
+                ctrl,
+                alt,
+                keep_idnames,
+            ) in GLOBAL_KEY_POLICIES:
+
+                if kmi.idname in keep_idnames:
+                    continue
+
+                if is_exact_event(
+                    kmi,
+                    event_type,
+                    value=value,
+                    shift=shift,
+                    ctrl=ctrl,
+                    alt=alt,
+                ):
+                    if _track_disable_kmi(km, kmi):
+                        disabled_count += 1
+                    break
+
+    print(
+        f"🔇 グローバルキーポリシーにより {disabled_count} 件の"
+        "競合割り当てを無効化しました。"
+    )
+
+
+def disable_alt_s_keyinsert_conflicts(keyconfig):
+    keyframe_insert_prefixes = (
+        'anim.keyframe_insert',
+    )
+
+    disabled_count = 0
+
+    for km in keyconfig.keymaps:
+        for kmi in km.keymap_items:
+            if kmi.type != 'S':
+                continue
+
+            is_keyframe_insert = any(
+                kmi.idname.startswith(prefix)
+                for prefix in keyframe_insert_prefixes
+            )
+
+            if not is_keyframe_insert:
+                continue
+
+            if kmi.any or kmi.alt:
+                if _track_disable_kmi(km, kmi):
+                    disabled_count += 1
+
+    print(
+        f"🔇 Alt+Sで誤発動するキー挿入を {disabled_count} 件"
+        "無効化しました。"
+    )
+
+
+def disable_space_play_bindings(keyconfig):
+    disabled_count = 0
+
+    for km in keyconfig.keymaps:
+        for kmi in km.keymap_items:
+            if kmi.idname != 'screen.animation_play':
+                continue
+
+            if not is_exact_event(kmi, 'SPACE', value='PRESS'):
+                continue
+
+            if _track_disable_kmi(km, kmi):
+                disabled_count += 1
+
+    print(
+        f"🔇 スペース=再生の割り当てを {disabled_count} 件"
+        "無効化しました。"
+    )
+
+
+def force_q_select_box_no_cycle(keyconfig):
+    """Qキーのツール割り当てから cycle を除去し、
+    矩形選択（builtin.select_box）に固定する。
+    """
+    fixed_cycle_count = 0
+    fixed_name_count = 0
+
+    tool_set_idnames = {
+        'wm.tool_set_by_id',
+        'wm.tool_set_by_index',
+    }
+
+    for km in keyconfig.keymaps:
+        for kmi in km.keymap_items:
+            if kmi.type != 'Q':
+                continue
+
+            if kmi.idname not in tool_set_idnames:
+                continue
+
+            properties = kmi.properties
+
+            try:
+                if getattr(properties, "cycle", False):
+                    properties.cycle = False
+                    fixed_cycle_count += 1
+            except Exception:
+                pass
+
+            try:
+                if (
+                    not kmi.any and
+                    not kmi.shift and
+                    not kmi.ctrl and
+                    not kmi.alt and
+                    not kmi.oskey
+                ):
+                    name = getattr(properties, "name", "")
+
+                    if (
+                        isinstance(name, str) and
+                        name.startswith("builtin.select") and
+                        name != "builtin.select_box"
+                    ):
+                        properties.name = "builtin.select_box"
+                        fixed_name_count += 1
+            except Exception:
+                pass
+
+    print(
+        f"🔒 Qキーのツール切替: cycle無効化 {fixed_cycle_count} 件 / "
+        f"矩形選択へ固定 {fixed_name_count} 件"
+    )
+
+
+def add_addon_binding(
+    km,
+    operator,
+    event_type,
+    value='PRESS',
+    *,
+    shift=False,
+    ctrl=False,
+    alt=False,
+    oskey=False,
+    repeat=None,
+    properties=None,
+):
+    """アドオンキーマップに項目を追加し、解除用に記録する。"""
+    arguments = {
+        "type": event_type,
+        "value": value,
+        "shift": shift,
+        "ctrl": ctrl,
+        "alt": alt,
+        "oskey": oskey,
+    }
+
+    try:
+        kmi = km.keymap_items.new(
+            operator,
+            head=True,
+            **arguments,
+        )
+    except TypeError:
+        kmi = km.keymap_items.new(
+            operator,
+            **arguments,
+        )
+
+    if repeat is not None:
+        try:
+            kmi.repeat = repeat
+        except Exception:
+            pass
+
+    for property_name, property_value in (properties or {}).items():
+        try:
+            setattr(
+                kmi.properties,
+                property_name,
+                property_value,
+            )
+        except Exception as error:
+            print(
+                f"⚠️ {operator}.{property_name} を設定できませんでした: "
+                f"{error}"
+            )
+
+    _addon_keymaps.append((km, kmi))
+    return kmi
+
+
+def get_addon_keymap(
+    keyconfig,
+    name,
+    space_type='EMPTY',
+    region_type='WINDOW',
+):
+    """アドオン KC 上のキーマップを取得または作成する。
+    再適用時に同名キーマップを再利用し、項目の重複蓄積を防ぐ。
+    """
+    for km in keyconfig.keymaps:
+        if (
+            km.name == name and
+            km.space_type == space_type and
+            km.region_type == region_type
+        ):
+            return km
+
+    return keyconfig.keymaps.new(
+        name=name,
+        space_type=space_type,
+        region_type=region_type,
+    )
+
+
+def activate_industry_compatible_base(restore_user=False):
+    filepath = find_industry_compatible_preset()
+
+    if not filepath:
+        print(
+            "⚠️ Industry Compatibleキーマップが見つかりませんでした。"
+        )
+        return False
+
+    result = bpy.utils.keyconfig_set(filepath)
+
+    if result is False:
+        print(
+            "⚠️ Industry Compatibleキーマップを有効化できませんでした。"
+        )
+        return False
+
+    if restore_user:
+        result = bpy.ops.preferences.keymap_restore(all=True)
+        if 'FINISHED' not in result:
+            print("⚠️ ユーザーキーマップをリセットできませんでした。")
+            return False
+
+    return True
+
+
+def setup_maya_style_zoom_direction(preferences):
+    inputs = preferences.inputs
+    inputs.view_zoom_method = 'DOLLY'
+    inputs.view_zoom_axis = 'HORIZONTAL'
+    inputs.invert_mouse_zoom = False
+
+
+def setup_maya_style_graph_theme(preferences):
+    try:
+        theme = preferences.themes[0]
+    except Exception as error:
+        print(f"⚠️ テーマを取得できませんでした: {error}")
+        return
+
+    graph_theme = getattr(theme, "graph_editor", None)
+
+    if graph_theme is None:
+        print("⚠️ グラフエディターのテーマ設定が見つかりませんでした。")
+        return
+
+    try:
+        graph_theme.vertex_size = get_graph_key_vertex_size()
+    except Exception as error:
+        print(f"⚠️ vertex_size を設定できませんでした: {error}")
+
+    try:
+        graph_theme.handle_vertex_size = get_graph_handle_vertex_size()
+    except Exception:
+        pass
+
+    print(
+        f"✅ グラフエディターのキーフレーム点サイズを "
+        f"{get_graph_key_vertex_size()} に拡大しました。"
+    )
+
+
+def apply_input_preferences():
+    preferences = bpy.context.preferences
+    prefs = _addon_prefs()
+
+    disable_emulate = True if prefs is None else prefs.disable_mouse_emulate_3_button
+    apply_zoom = True if prefs is None else prefs.apply_maya_zoom
+
+    if disable_emulate:
+        try:
+            preferences.inputs.use_mouse_emulate_3_button = False
+        except Exception:
+            pass
+
+    if apply_zoom:
+        try:
+            setup_maya_style_zoom_direction(preferences)
+        except Exception as error:
+            print(f"⚠️ ズーム設定を適用できませんでした: {error}")
+
+    try:
+        setup_maya_style_graph_theme(preferences)
+    except Exception as error:
+        print(f"⚠️ グラフテーマを適用できませんでした: {error}")
+
+
+def register_maya_keymaps():
+    """アドオンキーマップとユーザー競合の無効化を適用する。"""
+    _clear_addon_keymaps()
+    # 以前の無効化を一旦戻してから再適用（再適用オペレーター用）
+    _restore_disabled_user_keymap_items()
+
+    wm = bpy.context.window_manager
+    kc_addon = wm.keyconfigs.addon
+    kc_user = wm.keyconfigs.user
+
+    if not kc_addon:
+        raise RuntimeError(
+            "アドオンキーマップを取得できませんでした。"
+        )
+
+    if not kc_user:
         raise RuntimeError(
             "ユーザーキーマップを取得できませんでした。"
         )
 
     # --------------------------------------------------------
-    # スペース=再生
+    # ユーザー側の競合を無効化（無効化時に解除）
     # --------------------------------------------------------
 
-    disable_space_play_bindings(kc)
-
-    if KEEP_SPACE_PLAY_IN_ANIM_EDITORS:
-        restore_space_play_in_anim_editors(kc)
-
-    # --------------------------------------------------------
-    # グローバルキーポリシー
-    # --------------------------------------------------------
-
-    apply_global_key_policies(kc)
-    disable_alt_s_keyinsert_conflicts(kc)
+    disable_space_play_bindings(kc_user)
+    apply_global_key_policies(kc_user)
+    disable_alt_s_keyinsert_conflicts(kc_user)
+    force_q_select_box_no_cycle(kc_user)
 
     # --------------------------------------------------------
-    # キーマップ取得
+    # アドオンキーマップ
     # --------------------------------------------------------
 
-    km_3d = get_keymap(
-        kc,
+    km_3d = get_addon_keymap(
+        kc_addon,
         "3D View",
         space_type='VIEW_3D',
     )
 
-    km_screen = get_keymap(
-        kc,
+    km_screen = get_addon_keymap(
+        kc_addon,
         "Screen",
     )
 
-    km_window = get_keymap(
-        kc,
+    km_window = get_addon_keymap(
+        kc_addon,
         "Window",
     )
 
-    km_object = get_keymap(
-        kc,
+    km_object = get_addon_keymap(
+        kc_addon,
         "Object Mode",
     )
 
-    km_pose = get_keymap(
-        kc,
+    km_pose = get_addon_keymap(
+        kc_addon,
+        "Pose",
+    )
+    # Pose Mode 名は環境により "Pose" / "Pose Mode"
+    # Industry Compatible では "Pose" の場合があるため両方登録
+    km_pose_mode = get_addon_keymap(
+        kc_addon,
         "Pose Mode",
     )
 
-    km_mesh = get_keymap(
-        kc,
+    km_mesh = get_addon_keymap(
+        kc_addon,
         "Mesh",
     )
 
-    km_dopesheet = get_keymap(
-        kc,
+    km_dopesheet = get_addon_keymap(
+        kc_addon,
         "Dopesheet",
         space_type='DOPESHEET_EDITOR',
     )
 
-    km_graph = get_keymap(
-        kc,
+    km_graph = get_addon_keymap(
+        kc_addon,
         "Graph Editor",
         space_type='GRAPH_EDITOR',
     )
 
-    km_nla = get_keymap(
-        kc,
+    km_nla = get_addon_keymap(
+        kc_addon,
         "NLA Editor",
         space_type='NLA_EDITOR',
     )
 
-    km_view2d = get_keymap(
-        kc,
+    km_view2d = get_addon_keymap(
+        kc_addon,
         "View2D",
     )
 
@@ -4343,6 +4656,7 @@ def setup_maya_keymap_fixed():
         km_3d,
         km_object,
         km_pose,
+        km_pose_mode,
         km_mesh,
     )
 
@@ -4350,13 +4664,13 @@ def setup_maya_keymap_fixed():
     # グローバルキー
     # --------------------------------------------------------
 
-    add_binding(
+    add_addon_binding(
         km_window,
         'ed.undo',
         'Z',
     )
 
-    add_binding(
+    add_addon_binding(
         km_window,
         'screen.animation_play',
         'Q',
@@ -4388,7 +4702,7 @@ def setup_maya_keymap_fixed():
     )
 
     for key, operator, properties in global_anim_defs:
-        add_binding(
+        add_addon_binding(
             km_window,
             operator,
             key,
@@ -4396,7 +4710,7 @@ def setup_maya_keymap_fixed():
             properties=properties,
         )
 
-    add_binding(
+    add_addon_binding(
         km_window,
         'view3d.maya_toggle_controllers',
         'ONE',
@@ -4404,7 +4718,7 @@ def setup_maya_keymap_fixed():
         repeat=False,
     )
 
-    add_binding(
+    add_addon_binding(
         km_window,
         'object.maya_reset_transforms',
         'NUMPAD_ASTERIX',
@@ -4412,7 +4726,7 @@ def setup_maya_keymap_fixed():
         repeat=False,
     )
 
-    add_binding(
+    add_addon_binding(
         km_window,
         'object.maya_reset_transforms',
         'EIGHT',
@@ -4423,7 +4737,6 @@ def setup_maya_keymap_fixed():
 
     # --------------------------------------------------------
     # Q / W / E / R
-    # Q は cycle=False を明示して矩形選択に固定する。
     # --------------------------------------------------------
 
     qwer_defs = (
@@ -4435,7 +4748,7 @@ def setup_maya_keymap_fixed():
 
     for km_target in mode_keymaps:
         for key, tool_name in qwer_defs:
-            add_binding(
+            add_addon_binding(
                 km_target,
                 'wm.tool_set_by_id',
                 key,
@@ -4449,25 +4762,25 @@ def setup_maya_keymap_fixed():
     # アニメーションエディター W / E / R / F
     # --------------------------------------------------------
 
-    add_binding(
+    add_addon_binding(
         km_graph,
         'transform.translate',
         'W',
     )
 
-    add_binding(
+    add_addon_binding(
         km_graph,
         'transform.rotate',
         'E',
     )
 
-    add_binding(
+    add_addon_binding(
         km_graph,
         'transform.resize',
         'R',
     )
 
-    add_binding(
+    add_addon_binding(
         km_dopesheet,
         'transform.transform',
         'W',
@@ -4476,7 +4789,7 @@ def setup_maya_keymap_fixed():
         },
     )
 
-    add_binding(
+    add_addon_binding(
         km_dopesheet,
         'transform.transform',
         'R',
@@ -4485,7 +4798,7 @@ def setup_maya_keymap_fixed():
         },
     )
 
-    add_binding(
+    add_addon_binding(
         km_nla,
         'transform.transform',
         'W',
@@ -4494,7 +4807,7 @@ def setup_maya_keymap_fixed():
         },
     )
 
-    add_binding(
+    add_addon_binding(
         km_nla,
         'transform.transform',
         'R',
@@ -4503,19 +4816,19 @@ def setup_maya_keymap_fixed():
         },
     )
 
-    add_binding(
+    add_addon_binding(
         km_graph,
         'graph.view_selected',
         'F',
     )
 
-    add_binding(
+    add_addon_binding(
         km_dopesheet,
         'action.view_selected',
         'F',
     )
 
-    add_binding(
+    add_addon_binding(
         km_nla,
         'nla.view_selected',
         'F',
@@ -4525,14 +4838,14 @@ def setup_maya_keymap_fixed():
     # グラフエディター
     # --------------------------------------------------------
 
-    add_binding(
+    add_addon_binding(
         km_graph,
         'graph.maya_d_key',
         'D',
         repeat=False,
     )
 
-    add_binding(
+    add_addon_binding(
         km_graph,
         'graph.maya_slide_keys',
         'MIDDLEMOUSE',
@@ -4543,14 +4856,14 @@ def setup_maya_keymap_fixed():
     # 2Dエディター共通ナビゲーション
     # --------------------------------------------------------
 
-    add_binding(
+    add_addon_binding(
         km_view2d,
         'view2d.pan',
         'MIDDLEMOUSE',
         alt=True,
     )
 
-    add_binding(
+    add_addon_binding(
         km_view2d,
         'view2d.zoom',
         'RIGHTMOUSE',
@@ -4558,7 +4871,7 @@ def setup_maya_keymap_fixed():
     )
 
     # --------------------------------------------------------
-    # アニメーション操作
+    # アニメーション操作（各エディター）
     # --------------------------------------------------------
 
     anim_defs = (
@@ -4605,6 +4918,7 @@ def setup_maya_keymap_fixed():
         km_3d,
         km_object,
         km_pose,
+        km_pose_mode,
         km_mesh,
         km_dopesheet,
         km_graph,
@@ -4613,12 +4927,22 @@ def setup_maya_keymap_fixed():
 
     for km_target in animation_keymaps:
         for key, operator, properties, use_alt in anim_defs:
-            add_binding(
+            add_addon_binding(
                 km_target,
                 operator,
                 key,
                 alt=use_alt,
                 properties=properties,
+            )
+
+    # アニメーションエディターで Space=再生を維持
+    if get_keep_space_play_in_anim_editors():
+        for km_target in (km_dopesheet, km_graph, km_nla):
+            add_addon_binding(
+                km_target,
+                'screen.animation_play',
+                'SPACE',
+                repeat=False,
             )
 
     # --------------------------------------------------------
@@ -4632,7 +4956,7 @@ def setup_maya_keymap_fixed():
     )
 
     for mouse_button, operator in nav_defs:
-        add_binding(
+        add_addon_binding(
             km_3d,
             operator,
             mouse_button,
@@ -4640,12 +4964,11 @@ def setup_maya_keymap_fixed():
         )
 
     # --------------------------------------------------------
-    # Ctrl+Shift+右クリック
-    # Manipulator Orientation / Micro Manipulator / Mode
+    # Ctrl+Shift+右クリック: Manipulator Settings
     # --------------------------------------------------------
 
     for km_target in mode_keymaps:
-        add_binding(
+        add_addon_binding(
             km_target,
             'wm.call_menu',
             'RIGHTMOUSE',
@@ -4663,7 +4986,7 @@ def setup_maya_keymap_fixed():
     # スペースキー
     # --------------------------------------------------------
 
-    add_binding(
+    add_addon_binding(
         km_3d,
         'view3d.maya_space',
         'SPACE',
@@ -4675,7 +4998,7 @@ def setup_maya_keymap_fixed():
     # --------------------------------------------------------
 
     for km_target in mode_keymaps:
-        add_binding(
+        add_addon_binding(
             km_target,
             'view3d.maya_toggle_controllers',
             'ONE',
@@ -4687,8 +5010,9 @@ def setup_maya_keymap_fixed():
         km_3d,
         km_object,
         km_pose,
+        km_pose_mode,
     ):
-        add_binding(
+        add_addon_binding(
             km_target,
             'object.maya_reset_transforms',
             'NUMPAD_ASTERIX',
@@ -4696,7 +5020,7 @@ def setup_maya_keymap_fixed():
             repeat=False,
         )
 
-        add_binding(
+        add_addon_binding(
             km_target,
             'object.maya_reset_transforms',
             'EIGHT',
@@ -4705,13 +5029,11 @@ def setup_maya_keymap_fixed():
             repeat=False,
         )
 
-    # グラフエディター / ドープシートでもAlt+*を有効化し、
-    # 選択キーフレームのデフォルト化として動作させる。
     for km_target in (
         km_graph,
         km_dopesheet,
     ):
-        add_binding(
+        add_addon_binding(
             km_target,
             'object.maya_reset_transforms',
             'NUMPAD_ASTERIX',
@@ -4719,7 +5041,7 @@ def setup_maya_keymap_fixed():
             repeat=False,
         )
 
-        add_binding(
+        add_addon_binding(
             km_target,
             'object.maya_reset_transforms',
             'EIGHT',
@@ -4736,8 +5058,9 @@ def setup_maya_keymap_fixed():
         km_3d,
         km_object,
         km_pose,
+        km_pose_mode,
     ):
-        add_binding(
+        add_addon_binding(
             km_target,
             'view3d.view_selected',
             'F',
@@ -4759,7 +5082,7 @@ def setup_maya_keymap_fixed():
 
     for km_target in mode_keymaps:
         for key, shading_type in shading_defs:
-            add_binding(
+            add_addon_binding(
                 km_target,
                 'wm.context_set_enum',
                 key,
@@ -4784,7 +5107,7 @@ def setup_maya_keymap_fixed():
         km_mesh,
     ):
         for key, level in subdivision_defs:
-            add_binding(
+            add_addon_binding(
                 km_target,
                 'object.subdivision_set',
                 key,
@@ -4799,7 +5122,7 @@ def setup_maya_keymap_fixed():
     # F8 / F9 / F10 / F11
     # --------------------------------------------------------
 
-    add_binding(
+    add_addon_binding(
         km_3d,
         'object.editmode_toggle',
         'F8',
@@ -4812,7 +5135,7 @@ def setup_maya_keymap_fixed():
     )
 
     for key, select_type in component_defs:
-        add_binding(
+        add_addon_binding(
             km_mesh,
             'mesh.select_mode',
             key,
@@ -4825,7 +5148,7 @@ def setup_maya_keymap_fixed():
     # ダブルクリック = エッジループ選択
     # --------------------------------------------------------
 
-    add_binding(
+    add_addon_binding(
         km_mesh,
         'mesh.loop_select',
         'LEFTMOUSE',
@@ -4837,17 +5160,63 @@ def setup_maya_keymap_fixed():
         },
     )
 
-    # --------------------------------------------------------
-    # Q = 矩形選択固定（全キーマップのcycleを除去）
-    # --------------------------------------------------------
+    print(
+        f"✅ アドオンキーマップを {len(_addon_keymaps)} 件登録しました。"
+    )
 
-    force_q_select_box_no_cycle(kc)
 
-    # --------------------------------------------------------
-    # プリセット保存
-    # --------------------------------------------------------
+def unregister_maya_keymaps():
+    _clear_addon_keymaps()
+    _restore_disabled_user_keymap_items()
 
-    if SAVE_AS_PRESET:
+
+# ============================================================
+# メンテナンス用オペレーター
+# ============================================================
+
+class WM_OT_maya_hotkey_reapply_keymap(bpy.types.Operator):
+    bl_idname = "wm.maya_hotkey_reapply_keymap"
+    bl_label = "Maya風キーマップを再適用"
+    bl_description = (
+        "アドオンキーマップと競合無効化をやり直す"
+    )
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        prefs = _addon_prefs(context)
+
+        try:
+            restore_maya_micro_space_visibility()
+        except Exception:
+            pass
+
+        if prefs is not None and prefs.use_industry_compatible_base:
+            activate_industry_compatible_base(
+                restore_user=bool(prefs.restore_user_keymap_on_base),
+            )
+
+        apply_input_preferences()
+        setup_graph_editor_handle_display()
+
+        try:
+            register_maya_keymaps()
+        except Exception as error:
+            self.report({'ERROR'}, f"キーマップ再適用に失敗: {error}")
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, "Maya風キーマップを再適用しました。")
+        return {'FINISHED'}
+
+
+class WM_OT_maya_hotkey_export_preset(bpy.types.Operator):
+    bl_idname = "wm.maya_hotkey_export_preset"
+    bl_label = "キーマッププリセットを書き出し"
+    bl_description = (
+        "現在のユーザーキーマップを presets/keyconfig に保存"
+    )
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
         preset_directory = bpy.utils.user_resource(
             'SCRIPTS',
             path="presets/keyconfig",
@@ -4855,78 +5224,113 @@ def setup_maya_keymap_fixed():
         )
 
         if not preset_directory:
-            raise RuntimeError(
-                "キーマッププリセットの保存先を作成できませんでした。"
+            self.report(
+                {'ERROR'},
+                "プリセット保存先を作成できませんでした。",
             )
+            return {'CANCELLED'}
 
         target_file = os.path.join(
             preset_directory,
             PRESET_FILENAME,
         )
 
-        result = bpy.ops.preferences.keyconfig_export(
-            filepath=target_file,
-            all=True,
-        )
+        try:
+            result = bpy.ops.preferences.keyconfig_export(
+                filepath=target_file,
+                all=True,
+            )
+        except Exception as error:
+            self.report({'ERROR'}, f"書き出し失敗: {error}")
+            return {'CANCELLED'}
 
         if 'FINISHED' not in result:
-            raise RuntimeError(
-                "キーマッププリセットを書き出せませんでした。"
-            )
+            self.report({'ERROR'}, "キーマッププリセットを書き出せませんでした。")
+            return {'CANCELLED'}
 
-        print(f"✅ キーマッププリセット保存: {target_file}")
+        self.report({'INFO'}, f"保存しました: {target_file}")
+        return {'FINISHED'}
 
-    # --------------------------------------------------------
-    # 環境設定保存
-    # --------------------------------------------------------
+
+# ============================================================
+# register / unregister
+# ============================================================
+
+_classes_extra = (
+    MAYA_HOTKEY_AT_preferences,
+    WM_OT_maya_hotkey_reapply_keymap,
+    WM_OT_maya_hotkey_export_preset,
+)
+
+
+def register():
+    # Preferences を先に登録
+    for cls in _classes_extra:
+        try:
+            bpy.utils.register_class(cls)
+        except Exception:
+            # 再登録時
+            try:
+                bpy.utils.unregister_class(cls)
+            except Exception:
+                pass
+            bpy.utils.register_class(cls)
+
+    # 旧 Micro 状態の復旧
+    try:
+        restore_maya_micro_space_visibility()
+    except Exception:
+        pass
+
+    register_maya_space_classes()
+    register_maya_runtime_properties()
+    register_graph_display_load_handler()
+
+    prefs = _addon_prefs()
+
+    if prefs is None or prefs.use_industry_compatible_base:
+        restore_user = bool(
+            prefs.restore_user_keymap_on_base
+        ) if prefs is not None else False
+        activate_industry_compatible_base(restore_user=restore_user)
+
+    apply_input_preferences()
+    setup_graph_editor_handle_display()
 
     try:
-        bpy.ops.wm.save_userpref()
-        print("✅ 環境設定とキーマップを保存しました。")
+        register_maya_keymaps()
     except Exception as error:
-        print(f"⚠️ 環境設定を保存できませんでした: {error}")
+        print(f"⚠️ キーマップ登録に失敗しました: {error}")
+        raise
 
-    print("🎉 Maya風キーマップの設定が完了しました。")
-    print("   Alt+左: 回転 / Alt+中: パン / Alt+右: ズーム")
-    print("   F: 選択対象へフォーカス")
-    print("   Space単押し: 1画面 / 4分割 トグル")
-    print("   Space長押し: Hotbox風パイメニュー")
-    print("   Q: 矩形選択に固定（連打しても切り替わりません）")
-    print("")
-    print("   ▼ Manipulator Settings:")
-    print("   Ctrl+Shift+右クリック: 設定メニュー")
-    print("      ・Global / Local / Gimbal")
-    print("      ・Micro Manipulator ON / OFF（W/E/R連動）")
-    print("      ・Object / Edit / Pose モード切替")
-    print("   Micro Manipulator:")
-    print("      通常の約1/10感度で高精度操作")
-    print("")
-    print("   ▼ 以下はどのエディター上でも有効:")
-    print("   Z: Undo")
-    print("   Alt+Q: 再生 / 停止")
-    print("   Alt+W / Alt+S: 前後のキーフレーム")
-    print("   Alt+A / Alt+D: 1フレーム移動")
-    print("   Alt+1: コントローラー表示 / 非表示")
-    print("   Alt+テンキー* または Alt+Shift+8:")
-    print("      3D View上: 選択対象のトランスフォームを初期化")
-    print("      グラフエディター / ドープシート上:")
-    print("         選択中のキーフレームだけをデフォルト値へ")
-    print("         （未選択のキーは現在フレーム上でも変更しません）")
-    print("")
-    print("   ▼ グラフエディター:")
-    print("   Shift+中ドラッグ: 軸ロックキー移動")
-    print("")
-    print("ℹ️ 初回実行時は")
-    print("   RESET_TO_CLEAN_INDUSTRY_BASE=True")
-    print("   のまま実行してください。")
-    print("")
-    print("⚠️ カスタムオペレーターとMicro Manipulatorを")
-    print("   Blender再起動後も使うにはアドオン化するか、")
-    print("   スクリプトのRegisterを有効にしてください。")
+    print("🎉 My Hot Key Inspired by Maya を有効化しました。")
+    print("   Preferences > Add-ons から設定・再適用が可能です。")
+    print("   再起動後もアドオンが有効なら全機能が自動で復元されます。")
 
 
-# ============================================================
-# 実行
-# ============================================================
+def unregister():
+    try:
+        restore_maya_micro_space_visibility()
+    except Exception:
+        pass
 
-setup_maya_keymap_fixed()
+    try:
+        unregister_maya_keymaps()
+    except Exception as error:
+        print(f"⚠️ キーマップ解除に失敗: {error}")
+
+    unregister_graph_display_load_handler()
+    unregister_maya_runtime_properties()
+    unregister_maya_space_classes()
+
+    for cls in reversed(_classes_extra):
+        try:
+            bpy.utils.unregister_class(cls)
+        except Exception:
+            pass
+
+    print("👋 My Hot Key Inspired by Maya を無効化しました。")
+
+
+if __name__ == "__main__":
+    register()
