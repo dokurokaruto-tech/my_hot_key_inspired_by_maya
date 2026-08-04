@@ -1,7 +1,7 @@
 bl_info = {
     "name": "My Hot Key Inspired by Maya",
     "author": "dokurokaruto",
-    "version": (1, 0, 1),
+    "version": (1, 0, 2),
     "blender": (3, 6, 0),
     "location": "Keymap / 3D View / Graph Editor",
     "description": (
@@ -304,7 +304,7 @@ class MAYA_HOTKEY_AT_preferences(bpy.types.AddonPreferences):
         col.label(text="Q/W/E/R: 選択 / 移動 / 回転 / スケール")
         col.label(text="Ctrl+Shift+RMB: Manipulator Settings")
         col.label(text="Z: Undo / Alt+Q: 再生")
-        col.label(text="Alt+W/S: キー移動 / Alt+A/D: 1F 移動")
+        col.label(text="Alt+W/S: キー移動（全域） / Alt+A/D: 1F 移動")
         col.label(text="Alt+1: コントローラー表示切替")
         col.label(text="Alt+* または Alt+Shift+8: トランスフォーム初期化")
 
@@ -2777,6 +2777,10 @@ class VIEW3D_OT_maya_toggle_controllers(bpy.types.Operator):
 class SCREEN_OT_maya_keyframe_jump(bpy.types.Operator):
     bl_idname = "screen.maya_keyframe_jump"
     bl_label = "キーフレームジャンプ (Maya Alt+W/S)"
+    bl_description = (
+        "選択オブジェクトの前後キーフレームへ移動。"
+        "マウス位置に関係なく動作する"
+    )
     bl_options = {'REGISTER'}
 
     next: bpy.props.BoolProperty(
@@ -2784,31 +2788,69 @@ class SCREEN_OT_maya_keyframe_jump(bpy.types.Operator):
         default=True,
     )
 
-    @staticmethod
-    def _collect_from_id(id_data, frames):
-        anim = getattr(id_data, "animation_data", None)
+    @classmethod
+    def poll(cls, context):
+        # エリア依存にしない。どこからでも実行可能にする。
+        return getattr(context, "scene", None) is not None
 
+    @staticmethod
+    def _iter_action_fcurves(action):
+        if action is None:
+            return
+
+        # Blender 4.4+ layered actions
+        try:
+            layers = getattr(action, "layers", None)
+            if layers:
+                for layer in layers:
+                    for strip in getattr(layer, "strips", []) or []:
+                        ch_bag = getattr(strip, "channelbag", None)
+                        if ch_bag is None:
+                            continue
+                        for fcurve in getattr(ch_bag, "fcurves", []) or []:
+                            yield fcurve
+                return
+        except Exception:
+            pass
+
+        try:
+            for fcurve in action.fcurves:
+                yield fcurve
+        except Exception:
+            pass
+
+    @classmethod
+    def _collect_from_id(cls, id_data, frames):
+        if id_data is None:
+            return
+
+        anim = getattr(id_data, "animation_data", None)
         if anim is None:
             return
 
-        action = anim.action
-
+        action = getattr(anim, "action", None)
         if action is None:
             return
 
         try:
-            for fcurve in action.fcurves:
-                for keyframe_point in fcurve.keyframe_points:
-                    frames.add(keyframe_point.co.x)
+            for fcurve in cls._iter_action_fcurves(action):
+                try:
+                    for keyframe_point in fcurve.keyframe_points:
+                        frames.add(float(keyframe_point.co.x))
+                except Exception:
+                    pass
         except Exception:
             pass
 
-    def _collect_keyframes(self, context):
-        frames = set()
+    @classmethod
+    def _gather_objects(cls, context):
+        """エリア context に依存せず選択オブジェクトを集める。"""
         objects = set()
 
+        # 1) 通常 context
         try:
-            objects.update(context.selected_objects or [])
+            for obj in (context.selected_objects or []):
+                objects.add(obj)
         except Exception:
             pass
 
@@ -2818,42 +2860,114 @@ class SCREEN_OT_maya_keyframe_jump(bpy.types.Operator):
         except Exception:
             pass
 
+        # 2) view_layer から直接（Properties 等でも有効）
+        try:
+            view_layer = context.view_layer
+            if view_layer is not None:
+                for obj in view_layer.objects:
+                    try:
+                        if obj.select_get():
+                            objects.add(obj)
+                    except Exception:
+                        pass
+
+                active = getattr(view_layer.objects, "active", None)
+                if active is not None:
+                    objects.add(active)
+        except Exception:
+            pass
+
+        # 3) 全ウィンドウの view_layer も見る（コンテキスト欠落時）
+        if not objects:
+            try:
+                for window in context.window_manager.windows:
+                    screen = window.screen
+                    if screen is None:
+                        continue
+                    # window.view_layer があれば優先
+                    vl = getattr(window, "view_layer", None)
+                    if vl is None:
+                        continue
+                    for obj in vl.objects:
+                        try:
+                            if obj.select_get():
+                                objects.add(obj)
+                        except Exception:
+                            pass
+                    active = getattr(vl.objects, "active", None)
+                    if active is not None:
+                        objects.add(active)
+            except Exception:
+                pass
+
+        return objects
+
+    @classmethod
+    def _collect_keyframes(cls, context):
+        frames = set()
+        objects = cls._gather_objects(context)
+
         for obj in objects:
-            self._collect_from_id(obj, frames)
+            cls._collect_from_id(obj, frames)
 
+            # ポーズボーン固有の action は object 側 animation_data に含まれる
             data = getattr(obj, "data", None)
-
             if data is not None:
-                self._collect_from_id(data, frames)
+                cls._collect_from_id(data, frames)
 
                 shape_keys = getattr(data, "shape_keys", None)
-
                 if shape_keys is not None:
-                    self._collect_from_id(
-                        shape_keys,
-                        frames,
-                    )
+                    cls._collect_from_id(shape_keys, frames)
 
-        return frames
+            # マテリアル等（選択オブジェクトの）
+            try:
+                for slot in getattr(obj, "material_slots", []) or []:
+                    mat = getattr(slot, "material", None)
+                    if mat is not None:
+                        cls._collect_from_id(mat, frames)
+                        if getattr(mat, "node_tree", None) is not None:
+                            cls._collect_from_id(mat.node_tree, frames)
+            except Exception:
+                pass
+
+        return frames, objects
+
+    def invoke(self, context, event):
+        # マウス下エリアに依存せず execute へ
+        return self.execute(context)
 
     def execute(self, context):
         scene = context.scene
-        frames = self._collect_keyframes(context)
+        if scene is None:
+            self.report({'WARNING'}, "シーンがありません。")
+            return {'CANCELLED'}
+
+        frames, objects = self._collect_keyframes(context)
 
         if not frames:
+            # 選択にキーが無い場合のみグローバルジャンプを試す
             try:
-                return bpy.ops.screen.keyframe_jump(
-                    next=self.next
-                )
+                result = bpy.ops.screen.keyframe_jump(next=self.next)
+                if 'FINISHED' in result:
+                    self._tag_redraw(context)
+                    return {'FINISHED'}
             except Exception:
+                pass
+
+            if not objects:
+                self.report(
+                    {'INFO'},
+                    "オブジェクトが選択されていません。",
+                )
+            else:
                 self.report(
                     {'INFO'},
                     "選択オブジェクトにキーフレームがありません。",
                 )
-                return {'CANCELLED'}
+            return {'CANCELLED'}
 
         try:
-            current = scene.frame_current_final
+            current = float(scene.frame_current_final)
         except Exception:
             current = float(scene.frame_current)
 
@@ -2881,15 +2995,37 @@ class SCREEN_OT_maya_keyframe_jump(bpy.types.Operator):
             )
             return {'CANCELLED'}
 
-        frame = int(math.floor(target))
-        subframe = target - frame
+        frame = int(math.floor(target + 1e-6))
+        subframe = float(target) - float(frame)
 
         try:
             scene.frame_set(frame, subframe=subframe)
         except TypeError:
             scene.frame_set(frame)
+        except Exception as error:
+            self.report(
+                {'WARNING'},
+                f"フレーム移動に失敗しました: {error}",
+            )
+            return {'CANCELLED'}
 
+        self._tag_redraw(context)
         return {'FINISHED'}
+
+    @staticmethod
+    def _tag_redraw(context):
+        try:
+            for window in context.window_manager.windows:
+                screen = window.screen
+                if screen is None:
+                    continue
+                for area in screen.areas:
+                    try:
+                        area.tag_redraw()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
 
 # ============================================================
@@ -4346,6 +4482,43 @@ def disable_alt_s_keyinsert_conflicts(keyconfig):
     )
 
 
+def disable_alt_ws_conflicts(keyconfig):
+    """Alt+W / Alt+S の競合を全域で無効化し、キーフレームジャンプを優先する。"""
+    disabled_count = 0
+    keep = {
+        'screen.maya_keyframe_jump',
+    }
+
+    for km in keyconfig.keymaps:
+        for kmi in km.keymap_items:
+            if kmi.type not in {'W', 'S'}:
+                continue
+
+            if kmi.idname in keep:
+                continue
+
+            # Alt+W / Alt+S（any 含む）を潰す
+            uses_alt = bool(getattr(kmi, "alt", False) or getattr(kmi, "any", False))
+            if not uses_alt:
+                continue
+
+            # Shift/Ctrl 付きは別ショートカットとして残す
+            if kmi.shift or kmi.ctrl or kmi.oskey:
+                # any の場合は修飾の解釈が曖昧なので無効化
+                if not getattr(kmi, "any", False):
+                    continue
+
+            if kmi.value not in {'PRESS', 'ANY', 'CLICK'}:
+                continue
+
+            if _track_disable_kmi(km, kmi):
+                disabled_count += 1
+
+    print(
+        f"🔇 Alt+W/S の競合を {disabled_count} 件無効化しました。"
+    )
+
+
 def disable_space_play_bindings(keyconfig):
     disabled_count = 0
 
@@ -4731,6 +4904,7 @@ def register_maya_keymaps():
     disable_space_play_bindings(kc_user)
     apply_global_key_policies(kc_user)
     disable_alt_s_keyinsert_conflicts(kc_user)
+    disable_alt_ws_conflicts(kc_user)
     disable_ctrl_shift_rmb_conflicts(kc_user)
     force_q_select_box_no_cycle(kc_user)
 
@@ -4808,7 +4982,97 @@ def register_maya_keymaps():
 
     # --------------------------------------------------------
     # グローバルキー
+    # Alt+W/S 等はマウス下エリアに依存せず動くよう、
+    # Window / Screen に加え主要エディタ全域へ登録する
     # --------------------------------------------------------
+
+    # 追加の共通エディタ（ビューポート外でも Alt+W/S を拾う）
+    km_outliner = get_addon_keymap(
+        kc_addon,
+        "Outliner",
+        space_type='OUTLINER',
+    )
+    km_properties = get_addon_keymap(
+        kc_addon,
+        "Property Editor",
+        space_type='PROPERTIES',
+    )
+    km_uv = get_addon_keymap(
+        kc_addon,
+        "UV Editor",
+        space_type='IMAGE_EDITOR',
+    )
+    km_node = get_addon_keymap(
+        kc_addon,
+        "Node Editor",
+        space_type='NODE_EDITOR',
+    )
+    km_text = get_addon_keymap(
+        kc_addon,
+        "Text",
+        space_type='TEXT_EDITOR',
+    )
+    km_console = get_addon_keymap(
+        kc_addon,
+        "Console",
+        space_type='CONSOLE',
+    )
+    km_info = get_addon_keymap(
+        kc_addon,
+        "Info",
+        space_type='INFO',
+    )
+    km_file = get_addon_keymap(
+        kc_addon,
+        "File Browser",
+        space_type='FILE_BROWSER',
+    )
+    km_pref = get_addon_keymap(
+        kc_addon,
+        "Preferences",
+        space_type='PREFERENCES',
+    )
+    km_clip = get_addon_keymap(
+        kc_addon,
+        "Clip Editor",
+        space_type='CLIP_EDITOR',
+    )
+    km_seq = get_addon_keymap(
+        kc_addon,
+        "Sequencer",
+        space_type='SEQUENCE_EDITOR',
+    )
+    km_spreadsheet = get_addon_keymap(
+        kc_addon,
+        "Spreadsheet",
+        space_type='SPREADSHEET',
+    )
+
+    # ユーザー KC に存在する全キーマップ名も拾い、取りこぼしを防ぐ
+    extra_user_keymaps = []
+    try:
+        seen_names = set()
+        for km_user in kc_user.keymaps:
+            key = (km_user.name, km_user.space_type, km_user.region_type)
+            if key in seen_names:
+                continue
+            seen_names.add(key)
+            # モーダルマップは触らない
+            if getattr(km_user, "is_modal", False):
+                continue
+            try:
+                extra_user_keymaps.append(
+                    get_addon_keymap(
+                        kc_addon,
+                        km_user.name,
+                        space_type=km_user.space_type,
+                        region_type=km_user.region_type,
+                    )
+                )
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     add_addon_binding(
         km_window,
@@ -4847,14 +5111,56 @@ def register_maya_keymaps():
         ),
     )
 
-    for key, operator, properties in global_anim_defs:
-        add_addon_binding(
-            km_window,
-            operator,
-            key,
-            alt=True,
-            properties=properties,
-        )
+    # どこにマウスがあっても拾えるよう広範囲に登録
+    global_anim_keymaps = [
+        km_window,
+        km_screen,
+        km_3d,
+        km_object,
+        km_pose,
+        km_pose_mode,
+        km_mesh,
+        km_dopesheet,
+        km_graph,
+        km_nla,
+        km_outliner,
+        km_properties,
+        km_uv,
+        km_node,
+        km_text,
+        km_console,
+        km_info,
+        km_file,
+        km_pref,
+        km_clip,
+        km_seq,
+        km_spreadsheet,
+        km_view2d,
+    ]
+    global_anim_keymaps.extend(extra_user_keymaps)
+
+    # 重複除去（同一 km オブジェクト）
+    unique_global_anim_keymaps = []
+    seen_km = set()
+    for km_target in global_anim_keymaps:
+        try:
+            km_id = km_target.as_pointer()
+        except Exception:
+            km_id = id(km_target)
+        if km_id in seen_km:
+            continue
+        seen_km.add(km_id)
+        unique_global_anim_keymaps.append(km_target)
+
+    for km_target in unique_global_anim_keymaps:
+        for key, operator, properties in global_anim_defs:
+            add_addon_binding(
+                km_target,
+                operator,
+                key,
+                alt=True,
+                properties=properties,
+            )
 
     add_addon_binding(
         km_window,

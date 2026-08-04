@@ -29,7 +29,7 @@ Maya 風のホットキー・ビューポート操作・Micro Manipulator・Hotb
 | Ctrl + Shift + RMB | Manipulator Settings（方向・Micro・モード） |
 | Z | Undo |
 | Alt + Q | 再生 / 停止 |
-| Alt + W / S | 前後のキーフレーム |
+| Alt + W / S | 前後のキーフレーム（マウス位置不問・全域） |
 | Alt + A / D | 1 フレーム移動 |
 | Alt + 1 | コントローラー（ボーン）表示切替 |
 | Alt + * または Alt + Shift + 8 | トランスフォーム初期化（Anim エディタでは選択キーをデフォルト化） |
