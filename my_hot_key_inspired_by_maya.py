@@ -1,7 +1,7 @@
 bl_info = {
     "name": "My Hot Key Inspired by Maya",
     "author": "dokurokaruto",
-    "version": (1, 0, 0),
+    "version": (1, 0, 1),
     "blender": (3, 6, 0),
     "location": "Keymap / 3D View / Graph Editor",
     "description": (
@@ -1904,6 +1904,36 @@ class VIEW3D_OT_maya_set_interaction_mode(bpy.types.Operator):
             {'INFO'},
             f"モード: {self.mode}",
         )
+        return {'FINISHED'}
+
+
+
+class VIEW3D_OT_maya_call_manipulator_menu(bpy.types.Operator):
+    """Ctrl+Shift+右クリック用。wm.call_menu より確実にメニューを開く。"""
+    bl_idname = "view3d.maya_call_manipulator_menu"
+    bl_label = "Manipulator Settings を開く"
+    bl_options = {'REGISTER'}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+    def execute(self, context):
+        try:
+            bpy.ops.wm.call_menu(
+                name=VIEW3D_MT_maya_manipulator_menu.bl_idname,
+            )
+        except Exception as error:
+            try:
+                bpy.ops.wm.call_menu(
+                    name="VIEW3D_MT_maya_manipulator_menu",
+                )
+            except Exception as error2:
+                self.report(
+                    {'WARNING'},
+                    f"Manipulator Settings を開けませんでした: {error2}",
+                )
+                return {'CANCELLED'}
+
         return {'FINISHED'}
 
 
@@ -4122,6 +4152,7 @@ MAYA_SPACE_CLASSES = (
     VIEW3D_OT_maya_set_transform_orientation,
     VIEW3D_OT_maya_toggle_micro_manipulator,
     VIEW3D_OT_maya_set_interaction_mode,
+    VIEW3D_OT_maya_call_manipulator_menu,
     VIEW3D_MT_maya_manipulator_menu,
     VIEW3D_GGT_maya_micro_manipulator,
 
@@ -4335,6 +4366,48 @@ def disable_space_play_bindings(keyconfig):
     )
 
 
+
+def disable_ctrl_shift_rmb_conflicts(keyconfig):
+    """Ctrl+Shift+右クリックの競合を無効化し、Manipulator Settings を優先する。"""
+    disabled_count = 0
+    keep_idnames = {
+        'view3d.maya_call_manipulator_menu',
+        'wm.call_menu',
+    }
+
+    for km in keyconfig.keymaps:
+        for kmi in km.keymap_items:
+            if not is_exact_event(
+                kmi,
+                'RIGHTMOUSE',
+                value='PRESS',
+                shift=True,
+                ctrl=True,
+            ):
+                continue
+
+            # 自分たちのメニュー呼び出しは残す
+            if kmi.idname in keep_idnames:
+                try:
+                    menu_name = getattr(kmi.properties, "name", "")
+                except Exception:
+                    menu_name = ""
+
+                if (
+                    kmi.idname == 'view3d.maya_call_manipulator_menu' or
+                    menu_name == VIEW3D_MT_maya_manipulator_menu.bl_idname or
+                    menu_name == "VIEW3D_MT_maya_manipulator_menu"
+                ):
+                    continue
+
+            if _track_disable_kmi(km, kmi):
+                disabled_count += 1
+
+    print(
+        f"🔇 Ctrl+Shift+RMB の競合を {disabled_count} 件無効化しました。"
+    )
+
+
 def force_q_select_box_no_cycle(keyconfig):
     """Qキーのツール割り当てから cycle を除去し、
     矩形選択（builtin.select_box）に固定する。
@@ -4403,27 +4476,99 @@ def add_addon_binding(
     repeat=None,
     properties=None,
 ):
-    """アドオンキーマップに項目を追加し、解除用に記録する。"""
-    arguments = {
-        "type": event_type,
-        "value": value,
-        "shift": shift,
-        "ctrl": ctrl,
-        "alt": alt,
-        "oskey": oskey,
-    }
+    """アドオンキーマップに項目を追加し、解除用に記録する。
 
+    type / value は Blender API の位置引数として渡す。
+    （キーワードの type= はバージョンによって無視・失敗することがある）
+    """
+    shift_i = 1 if shift else 0
+    ctrl_i = 1 if ctrl else 0
+    alt_i = 1 if alt else 0
+    oskey_i = 1 if oskey else 0
+
+    kmi = None
+    last_error = None
+
+    # 最優先: 正規の位置引数形式
     try:
         kmi = km.keymap_items.new(
             operator,
+            event_type,
+            value,
+            ctrl=ctrl_i,
+            alt=alt_i,
+            shift=shift_i,
+            oskey=oskey_i,
             head=True,
-            **arguments,
         )
-    except TypeError:
-        kmi = km.keymap_items.new(
-            operator,
-            **arguments,
-        )
+    except TypeError as error:
+        last_error = error
+
+    if kmi is None:
+        try:
+            kmi = km.keymap_items.new(
+                operator,
+                event_type,
+                value,
+                ctrl=ctrl_i,
+                alt=alt_i,
+                shift=shift_i,
+                oskey=oskey_i,
+            )
+        except TypeError as error:
+            last_error = error
+
+    if kmi is None:
+        try:
+            kmi = km.keymap_items.new(
+                operator,
+                type=event_type,
+                value=value,
+                ctrl=ctrl_i,
+                alt=alt_i,
+                shift=shift_i,
+                oskey=oskey_i,
+                head=True,
+            )
+        except TypeError as error:
+            last_error = error
+            raise RuntimeError(
+                f"キーマップ項目を作成できませんでした: "
+                f"{operator} {event_type} ({last_error})"
+            ) from error
+
+    # 修飾キーを明示再設定（bool/int 差の吸収）
+    try:
+        kmi.shift = bool(shift)
+    except Exception:
+        try:
+            kmi.shift = shift_i
+        except Exception:
+            pass
+
+    try:
+        kmi.ctrl = bool(ctrl)
+    except Exception:
+        try:
+            kmi.ctrl = ctrl_i
+        except Exception:
+            pass
+
+    try:
+        kmi.alt = bool(alt)
+    except Exception:
+        try:
+            kmi.alt = alt_i
+        except Exception:
+            pass
+
+    try:
+        kmi.oskey = bool(oskey)
+    except Exception:
+        try:
+            kmi.oskey = oskey_i
+        except Exception:
+            pass
 
     if repeat is not None:
         try:
@@ -4586,6 +4731,7 @@ def register_maya_keymaps():
     disable_space_play_bindings(kc_user)
     apply_global_key_policies(kc_user)
     disable_alt_s_keyinsert_conflicts(kc_user)
+    disable_ctrl_shift_rmb_conflicts(kc_user)
     force_q_select_box_no_cycle(kc_user)
 
     # --------------------------------------------------------
@@ -4965,9 +5111,30 @@ def register_maya_keymaps():
 
     # --------------------------------------------------------
     # Ctrl+Shift+右クリック: Manipulator Settings
+    # 専用オペレーターで開き、複数キーマップへ登録して取りこぼしを防ぐ
     # --------------------------------------------------------
 
-    for km_target in mode_keymaps:
+    manipulator_menu_keymaps = (
+        km_3d,
+        km_object,
+        km_pose,
+        km_pose_mode,
+        km_mesh,
+        km_window,
+        km_screen,
+    )
+
+    for km_target in manipulator_menu_keymaps:
+        add_addon_binding(
+            km_target,
+            'view3d.maya_call_manipulator_menu',
+            'RIGHTMOUSE',
+            ctrl=True,
+            shift=True,
+            repeat=False,
+        )
+
+        # 互換: wm.call_menu でも登録（環境差の保険）
         add_addon_binding(
             km_target,
             'wm.call_menu',
@@ -4976,9 +5143,7 @@ def register_maya_keymaps():
             shift=True,
             repeat=False,
             properties={
-                'name': (
-                    VIEW3D_MT_maya_manipulator_menu.bl_idname
-                ),
+                'name': VIEW3D_MT_maya_manipulator_menu.bl_idname,
             },
         )
 
