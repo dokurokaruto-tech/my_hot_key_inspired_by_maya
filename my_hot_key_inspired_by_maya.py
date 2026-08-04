@@ -1,7 +1,7 @@
 bl_info = {
     "name": "My Hot Key Inspired by Maya",
     "author": "dokurokaruto",
-    "version": (1, 0, 2),
+    "version": (1, 0, 3),
     "blender": (3, 6, 0),
     "location": "Keymap / 3D View / Graph Editor",
     "description": (
@@ -304,7 +304,7 @@ class MAYA_HOTKEY_AT_preferences(bpy.types.AddonPreferences):
         col.label(text="Q/W/E/R: 選択 / 移動 / 回転 / スケール")
         col.label(text="Ctrl+Shift+RMB: Manipulator Settings")
         col.label(text="Z: Undo / Alt+Q: 再生")
-        col.label(text="Alt+W/S: キー移動（全域） / Alt+A/D: 1F 移動")
+        col.label(text="S: キー挿入（全域） / Alt+W/S: キー移動 / Alt+A/D: 1F")
         col.label(text="Alt+1: コントローラー表示切替")
         col.label(text="Alt+* または Alt+Shift+8: トランスフォーム初期化")
 
@@ -441,6 +441,15 @@ GLOBAL_KEY_POLICIES = (
         False,
         True,
         {'screen.maya_keyframe_jump'},
+    ),
+    # 修飾なし S = Maya Set Key（キー挿入）
+    (
+        'S',
+        'PRESS',
+        False,
+        False,
+        False,
+        {'screen.maya_keyframe_insert', 'anim.keyframe_insert'},
     ),
     (
         'ONE',
@@ -3029,6 +3038,245 @@ class SCREEN_OT_maya_keyframe_jump(bpy.types.Operator):
 
 
 # ============================================================
+# S = キーフレーム挿入（Maya Set Key）
+# マウス位置に依存せず、選択オブジェクトに対して動作する
+# ============================================================
+
+class SCREEN_OT_maya_keyframe_insert(bpy.types.Operator):
+    bl_idname = "screen.maya_keyframe_insert"
+    bl_label = "キーフレーム挿入 (Maya S)"
+    bl_description = (
+        "選択オブジェクト / ボーンにキーを打つ。"
+        "ビューポート外でも同じ動作"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return getattr(context, "scene", None) is not None
+
+    @staticmethod
+    def _gather_objects(context):
+        objects = set()
+
+        try:
+            for obj in (context.selected_objects or []):
+                objects.add(obj)
+        except Exception:
+            pass
+
+        try:
+            if context.active_object is not None:
+                objects.add(context.active_object)
+        except Exception:
+            pass
+
+        try:
+            view_layer = context.view_layer
+            if view_layer is not None:
+                for obj in view_layer.objects:
+                    try:
+                        if obj.select_get():
+                            objects.add(obj)
+                    except Exception:
+                        pass
+                active = getattr(view_layer.objects, "active", None)
+                if active is not None:
+                    objects.add(active)
+        except Exception:
+            pass
+
+        if not objects:
+            try:
+                for window in context.window_manager.windows:
+                    vl = getattr(window, "view_layer", None)
+                    if vl is None:
+                        continue
+                    for obj in vl.objects:
+                        try:
+                            if obj.select_get():
+                                objects.add(obj)
+                        except Exception:
+                            pass
+                    active = getattr(vl.objects, "active", None)
+                    if active is not None:
+                        objects.add(active)
+            except Exception:
+                pass
+
+        return objects
+
+    @staticmethod
+    def _tag_redraw(context):
+        try:
+            for window in context.window_manager.windows:
+                screen = window.screen
+                if screen is None:
+                    continue
+                for area in screen.areas:
+                    try:
+                        area.tag_redraw()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def _try_ops_keyframe_insert(self, context):
+        """Blender 標準のキー挿入を、メニューを出さずに実行する。"""
+        # Industry Compatible の S に近い順で試す
+        attempt_specs = [
+            # (callable_factory,)
+            ('anim.keyframe_insert', {}),
+            ('anim.keyframe_insert', {'type': 'AVAILABLE'}),
+            ('anim.keyframe_insert', {'type': 'DEFAULT'}),
+            ('anim.keyframe_insert_by_name', {'type': 'Available'}),
+            ('anim.keyframe_insert_by_name', {'type': 'LocRotScale'}),
+            ('anim.keyframe_insert', {'type': 'LocRotScale'}),
+            ('anim.keyframe_insert_menu', {
+                'type': '__ACTIVE__',
+                'always_prompt': False,
+            }),
+        ]
+
+        for op_id, kwargs in attempt_specs:
+            try:
+                parts = op_id.split('.')
+                op = bpy.ops
+                for part in parts:
+                    op = getattr(op, part)
+
+                # always_prompt 非対応環境向け
+                try:
+                    result = op(**kwargs)
+                except TypeError:
+                    kwargs2 = dict(kwargs)
+                    kwargs2.pop('always_prompt', None)
+                    try:
+                        result = op(**kwargs2)
+                    except TypeError:
+                        # type 引数なし
+                        if not kwargs:
+                            raise
+                        try:
+                            result = op()
+                        except Exception:
+                            continue
+
+                if result is not None and 'FINISHED' in result:
+                    return True
+            except Exception:
+                continue
+
+        return False
+
+    def _manual_insert_on_targets(self, context):
+        """オペレーターが使えない場合の直接 keyframe_insert。"""
+        objects = self._gather_objects(context)
+        if not objects:
+            return 0
+
+        inserted = 0
+        try:
+            frame = context.scene.frame_current
+        except Exception:
+            frame = None
+
+        is_pose = (getattr(context, "mode", "") == 'POSE')
+
+        if is_pose:
+            pose_bones = []
+            try:
+                pose_bones = list(context.selected_pose_bones or [])
+            except Exception:
+                pose_bones = []
+
+            if not pose_bones:
+                try:
+                    if context.active_pose_bone is not None:
+                        pose_bones = [context.active_pose_bone]
+                except Exception:
+                    pass
+
+            for pose_bone in pose_bones:
+                for data_path in (
+                    "location",
+                    "rotation_euler",
+                    "rotation_quaternion",
+                    "rotation_axis_angle",
+                    "scale",
+                ):
+                    try:
+                        if frame is not None:
+                            ok = pose_bone.keyframe_insert(data_path, frame=frame)
+                        else:
+                            ok = pose_bone.keyframe_insert(data_path)
+                        if ok:
+                            inserted += 1
+                    except Exception:
+                        pass
+            return inserted
+
+        for obj in objects:
+            # 回転モードに合わせたパス
+            rot_paths = ["rotation_euler", "rotation_quaternion", "rotation_axis_angle"]
+            mode = getattr(obj, "rotation_mode", 'XYZ')
+            if mode == 'QUATERNION':
+                rot_paths = ["rotation_quaternion"]
+            elif mode == 'AXIS_ANGLE':
+                rot_paths = ["rotation_axis_angle"]
+            else:
+                rot_paths = ["rotation_euler"]
+
+            data_paths = ["location"] + rot_paths + ["scale"]
+
+            for data_path in data_paths:
+                try:
+                    if frame is not None:
+                        ok = obj.keyframe_insert(data_path, frame=frame)
+                    else:
+                        ok = obj.keyframe_insert(data_path)
+                    if ok:
+                        inserted += 1
+                except Exception:
+                    pass
+
+        return inserted
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+    def execute(self, context):
+        objects = self._gather_objects(context)
+
+        if not objects and getattr(context, "mode", "") != 'POSE':
+            self.report({'INFO'}, "キーを打つ対象が選択されていません。")
+            return {'CANCELLED'}
+
+        # まず標準オペレーター（キーイングセット対応）
+        if self._try_ops_keyframe_insert(context):
+            self._tag_redraw(context)
+            self.report({'INFO'}, "キーフレームを挿入しました。")
+            return {'FINISHED'}
+
+        # フォールバック: 直接挿入
+        count = self._manual_insert_on_targets(context)
+        if count > 0:
+            self._tag_redraw(context)
+            self.report(
+                {'INFO'},
+                f"キーフレームを挿入しました（{count} チャンネル）。",
+            )
+            return {'FINISHED'}
+
+        self.report(
+            {'WARNING'},
+            "キーフレームを挿入できませんでした。"
+            "キーイングセットまたは選択を確認してください。",
+        )
+        return {'CANCELLED'}
+
+
+# ============================================================
 # Alt+* = トランスフォーム初期化 /
 #          選択キーフレームのデフォルト化
 # ============================================================
@@ -4304,6 +4552,7 @@ MAYA_SPACE_CLASSES = (
     GRAPH_OT_maya_d_key,
     VIEW3D_OT_maya_toggle_controllers,
     SCREEN_OT_maya_keyframe_jump,
+    SCREEN_OT_maya_keyframe_insert,
     OBJECT_OT_maya_reset_transforms,
     GRAPH_OT_maya_slide_keys,
 )
@@ -4516,6 +4765,40 @@ def disable_alt_ws_conflicts(keyconfig):
 
     print(
         f"🔇 Alt+W/S の競合を {disabled_count} 件無効化しました。"
+    )
+
+
+def disable_plain_s_conflicts(keyconfig):
+    """修飾なし S の競合を無効化し、Maya Set Key を優先する。
+
+    エリアによって Insert Keyframes メニューや別オペレーターが
+    立ち上がる問題を防ぐ。
+    """
+    disabled_count = 0
+
+    for km in keyconfig.keymaps:
+        for kmi in km.keymap_items:
+            if kmi.type != 'S':
+                continue
+
+            # 自分のオペレーターは残す
+            if kmi.idname == 'screen.maya_keyframe_insert':
+                continue
+
+            # 修飾キー付き（Alt+S 等）はここでは触らない
+            if not getattr(kmi, "any", False):
+                if kmi.shift or kmi.ctrl or kmi.alt or kmi.oskey:
+                    continue
+
+            if kmi.value not in {'PRESS', 'ANY', 'CLICK'}:
+                continue
+
+            # メニューを開くもの・標準のエリア依存キー挿入を無効化
+            if _track_disable_kmi(km, kmi):
+                disabled_count += 1
+
+    print(
+        f"🔇 修飾なしSの競合を {disabled_count} 件無効化しました。"
     )
 
 
@@ -4905,6 +5188,7 @@ def register_maya_keymaps():
     apply_global_key_policies(kc_user)
     disable_alt_s_keyinsert_conflicts(kc_user)
     disable_alt_ws_conflicts(kc_user)
+    disable_plain_s_conflicts(kc_user)
     disable_ctrl_shift_rmb_conflicts(kc_user)
     force_q_select_box_no_cycle(kc_user)
 
@@ -5161,6 +5445,15 @@ def register_maya_keymaps():
                 alt=True,
                 properties=properties,
             )
+
+        # 修飾なし S = Maya Set Key（キー挿入）
+        # ビューポート外でも Insert Keyframes メニューではなく同じ動作にする
+        add_addon_binding(
+            km_target,
+            'screen.maya_keyframe_insert',
+            'S',
+            repeat=False,
+        )
 
     add_addon_binding(
         km_window,
