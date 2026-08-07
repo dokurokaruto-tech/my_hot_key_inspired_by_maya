@@ -1,0 +1,29 @@
+{
+  "format_version": 1,
+  "tool": "Kenny's Animation Picker",
+  "pickers": [
+    {
+      "rig_name": "Anby",
+      "tabs": [
+        {
+          "name": "front",
+          "background_image": "",
+          "anchor": "BL",
+          "image_scale": 1.0,
+          "image_offset_x": 0.0,
+          "image_offset_y": 0.0,
+          "image_opacity": 1.0,
+          "buttons": [
+            {"id": "head",     "bone": "head",     "shape": "rect",   "x": 256, "y": 440, "w": 64, "h": 64, "color": "#e8c65a", "label": "HEAD"},
+            {"id": "neck",     "bone": "neck",     "shape": "rect",   "x": 256, "y": 380, "w": 48, "h": 48, "color": "#e8c65a", "label": "NECK"},
+            {"id": "armL",     "bone": "arm_L",    "shape": "circle", "x": 150, "y": 300, "w": 56, "h": 56, "color": "#7fbf7f", "label": "L"},
+            {"id": "armR",     "bone": "arm_R",    "shape": "circle", "x": 362, "y": 300, "w": 56, "h": 56, "color": "#7fbf7f", "label": "R"},
+            {"id": "legL",     "bone": "leg.L",    "shape": "circle", "x": 210, "y": 130, "w": 56, "h": 56, "color": "#7f9fcf", "label": "L"},
+            {"id": "legR",     "bone": "leg.R",    "shape": "circle", "x": 302, "y": 130, "w": 56, "h": 56, "color": "#7f9fcf", "label": "R"},
+            {"id": "spine",    "bone": "spine",    "shape": "rect",   "x": 238, "y": 240, "w": 36, "h": 100, "color": "#d08f5a", "label": "SPINE"}
+          ]
+        }
+      ]
+    }
+  ]
+}
