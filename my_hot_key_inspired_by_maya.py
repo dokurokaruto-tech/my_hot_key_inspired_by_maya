@@ -3756,6 +3756,11 @@ class OBJECT_OT_maya_reset_transforms(bpy.types.Operator):
 
 # ============================================================
 # グラフエディター: Shift+中ドラッグ
+# 修正: オイラー回転などで数値が暴れる不具合を修正。
+#       View上のマウス移動量(Region→View変換)がそのまま内部値(radians)に
+#       加算され、Degrees表示(57.3倍ズレ)で制御不能になっていた。
+#       各F-Curveのデータパス/単位系に応じたスケールで内部Δへ変換し、
+#       マウスカーソル分がそのまま見た目上の移動量になるよう修正。
 # ============================================================
 
 class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
@@ -3794,9 +3799,63 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
             )
         ]
 
+    @staticmethod
+    def _is_angle_fcurve(fcurve):
+        """回転の角度としてDegrees表示されるF-Curveか判定。
+        rotation_euler は常に角度。rotation_axis_angle は index 0 のみ角度。
+        """
+        try:
+            path = getattr(fcurve, "data_path", "") or ""
+            idx = getattr(fcurve, "array_index", 0)
+            if path.endswith("rotation_euler"):
+                return True
+            if path.endswith("rotation_axis_angle") and idx == 0:
+                return True
+            # pose.bones["..."].rotation_euler のようなパスも末尾で判定できる
+            if "rotation_euler" in path:
+                return True
+            if "rotation_axis_angle" in path and idx == 0:
+                return True
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
+    def _value_scale_for_fcurve(fcurve, context):
+        """View Δ(表示単位) → 内部 Δ(ラジアン等) へのスケール。
+        Degrees表示時は view=degrees, 内部=radians なので pi/180 を掛ける。
+        それ以外は 1.0。
+        正規化表示中は表示が0-1に正規化されているため角度変換は行わない。
+        """
+        try:
+            space = getattr(context, "space_data", None)
+            if space is not None and getattr(space, "use_normalization", False):
+                return 1.0
+            scene = getattr(context, "scene", None)
+            if scene is not None:
+                unit_settings = getattr(scene, "unit_settings", None)
+                if unit_settings is not None:
+                    rot_unit = getattr(unit_settings, "system_rotation", 'DEGREES')
+                    if rot_unit == 'RADIANS':
+                        return 1.0
+            # シーン取得不可でもデフォルトは Degrees とみなす
+            if GRAPH_OT_maya_slide_keys._is_angle_fcurve(fcurve):
+                return math.radians(1.0)  # pi/180
+        except Exception:
+            pass
+        return 1.0
+
     def invoke(self, context, event):
         region = context.region
         self._targets = []
+        # (fcurve, originals, value_scale) を保持。value_scale は ViewΔ→内部Δ変換用
+        self._use_normalization = False
+
+        try:
+            space_tmp = getattr(context, "space_data", None)
+            self._use_normalization = bool(getattr(space_tmp, "use_normalization", False))
+        except Exception:
+            self._use_normalization = False
 
         for fcurve in self._collect_editable_fcurves(context):
             originals = []
@@ -3822,7 +3881,8 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
                 continue
 
             if originals:
-                self._targets.append((fcurve, originals))
+                scale = self._value_scale_for_fcurve(fcurve, context)
+                self._targets.append((fcurve, originals, scale))
 
         if not self._targets:
             return {'PASS_THROUGH'}
@@ -3850,6 +3910,18 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
             )
         except Exception:
             return {'PASS_THROUGH'}
+
+        # 追加: ピクセル→Viewのスケールを保持（マウスカーソル追従の検証用）
+        # ただし実際の移動はViewΔを基にしつつ、各F-Curveで内部単位へ正しく変換する
+        try:
+            # View範囲からピクセルあたりのView量を算出（将来のピクセル基準補正に利用可能）
+            x0, y0 = region.view2d.region_to_view(0, 0)
+            x1, y1 = region.view2d.region_to_view(region.width, region.height)
+            self._view_per_pixel_x = (x1 - x0) / max(region.width, 1)
+            self._view_per_pixel_y = (y1 - y0) / max(region.height, 1)
+        except Exception:
+            self._view_per_pixel_x = 0.0
+            self._view_per_pixel_y = 0.0
 
         context.window_manager.modal_handler_add(self)
 
@@ -3914,31 +3986,47 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
         except Exception:
             return
 
-        delta_frame = view[0] - self._start_view[0]
-        delta_value = view[1] - self._start_view[1]
+        # マウスカーソル分の View Δ を取得。これが「カーソルが動いた分」そのもの。
+        delta_frame_view = view[0] - self._start_view[0]
+        delta_value_view = view[1] - self._start_view[1]
 
         if self._axis == 'FRAME':
-            delta_value = 0.0
+            delta_value_view = 0.0
 
             if get_slide_snap_frames() and not event.ctrl:
-                delta_frame = float(round(delta_frame))
+                delta_frame_view = float(round(delta_frame_view))
         else:
-            delta_frame = 0.0
+            delta_frame_view = 0.0
 
+        # 内部値への適用は各F-Curveのスケールで行うため、ここではViewΔを渡す
         self._apply_delta(
             context,
-            delta_frame,
-            delta_value,
+            delta_frame_view,
+            delta_value_view,
         )
 
         self._set_header(
             context,
-            delta_frame,
-            delta_value,
+            delta_frame_view,
+            delta_value_view,
         )
 
-    def _apply_delta(self, context, delta_frame, delta_value):
-        for fcurve, originals in self._targets:
+    def _apply_delta(self, context, delta_frame_view, delta_value_view):
+        # delta_*_view は View(表示)座標系でのマウス移動量。
+        # 各F-Curveで内部単位へ変換してから加算することで、
+        # 見た目上キーがマウスカーソルに追従し、オイラー回転でも57倍ズレが起きない。
+        for item in self._targets:
+            if len(item) == 3:
+                fcurve, originals, value_scale = item
+            else:
+                # 旧形式互換
+                fcurve, originals = item
+                value_scale = self._value_scale_for_fcurve(fcurve, context)
+
+            # フレーム軸は常にView=内部(フレーム)なのでスケール不要
+            # 値軸のみF-Curveごとにスケール
+            delta_value_internal = delta_value_view * value_scale
+
             try:
                 selected = [
                     keyframe_point
@@ -3956,19 +4044,21 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
                 originals,
             ):
                 try:
+                    # フレームと値は別々にスケール適用
+                    # 内部値 = 元の内部値 + ViewΔ * スケール
                     keyframe_point.co = (
-                        co[0] + delta_frame,
-                        co[1] + delta_value,
+                        co[0] + delta_frame_view,
+                        co[1] + delta_value_internal,
                     )
 
                     keyframe_point.handle_left = (
-                        hl[0] + delta_frame,
-                        hl[1] + delta_value,
+                        hl[0] + delta_frame_view,
+                        hl[1] + delta_value_internal,
                     )
 
                     keyframe_point.handle_right = (
-                        hr[0] + delta_frame,
-                        hr[1] + delta_value,
+                        hr[0] + delta_frame_view,
+                        hr[1] + delta_value_internal,
                     )
                 except Exception:
                     pass
@@ -3983,7 +4073,7 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
         except Exception:
             pass
 
-    def _set_header(self, context, delta_frame, delta_value):
+    def _set_header(self, context, delta_frame_view, delta_value_view):
         try:
             if self._axis == 'FRAME':
                 axis_label = "フレーム"
@@ -3992,10 +4082,26 @@ class GRAPH_OT_maya_slide_keys(bpy.types.Operator):
             else:
                 axis_label = "方向で軸決定"
 
+            # ViewΔを表示。内部がラジアンでも見た目はDegreesなのでViewΔの方が直感的
+            # ただし参考として内部Δ(Radians換算)も括弧内に表示
+            extra = ""
+            if self._axis == 'VALUE' and delta_value_view != 0.0:
+                # 代表的なスケールで内部Δを推定表示
+                try:
+                    # 最初のF-Curveのスケールで代表
+                    rep_scale = self._targets[0][2] if len(self._targets[0]) == 3 else 1.0
+                    internal = delta_value_view * rep_scale
+                    if abs(rep_scale - math.radians(1.0)) < 1e-9:
+                        extra = f" / 内部 {internal:+.4f} rad"
+                    elif rep_scale != 1.0:
+                        extra = f" / 内部 {internal:+.3f}"
+                except Exception:
+                    pass
+
             context.area.header_text_set(
                 f"キー移動 [{axis_label}]  "
-                f"Frame {delta_frame:+.1f} / "
-                f"Value {delta_value:+.3f}  "
+                f"Frame {delta_frame_view:+.1f} / "
+                f"Value {delta_value_view:+.3f}{extra}  "
                 "(MMB離す: 確定 / ESC: キャンセル / "
                 "Ctrl: スナップ解除)"
             )
