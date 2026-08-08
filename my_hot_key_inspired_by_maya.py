@@ -1777,7 +1777,16 @@ def _safe_setattr(target, name, value):
 class VIEW3D_OT_maya_set_transform_orientation(bpy.types.Operator):
     bl_idname = "view3d.maya_set_transform_orientation"
     bl_label = "マニピュレーター方向を設定"
-    bl_options = {'REGISTER'}
+
+    # 'UNDO' が必須。
+    # transform_orientation_slots はシーンデータのため
+    # アンドゥステップに記録されるが、'UNDO' が無いと
+    # この変更自体のステップが積まれず、直前のステップには
+    # 変更前の方向が残ったままになる。
+    # その状態でマニピュレーター操作などをして Z（ed.undo）を
+    # 1回押すと、数値の巻き戻しと同時に方向設定まで
+    # 一緒に戻ってしまう。
+    bl_options = {'REGISTER', 'UNDO'}
 
     orientation: bpy.props.EnumProperty(
         name="Transform Orientation",
